@@ -647,7 +647,8 @@ function cmdList(args: string[]) {
 }
 
 // Usage per account: 5-hour, 7-day, and model-scoped weekly (e.g. Fable)
-// percentages, for the menu bar app.
+// percentages, plus the credit pool for accounts metered on spend instead
+// of on windows, for the menu bar app.
 //
 // Successful endpoint responses are written to the same per-account cache
 // the statusline reads (`usage-limits-<name>.json`) — the endpoint often
@@ -655,7 +656,13 @@ function cmdList(args: string[]) {
 // everyone. Fallbacks per account: that cache (2h), then the session-
 // reported limits the statusline persists (`rate-limits-<name>.json`, 24h).
 type Limit = { pct: number; reset?: number };
-type UsageRow = { five?: Limit; week?: Limit; scoped?: Record<string, Limit> };
+type Credits = { pct: number; used: number; limit: number; currency: string };
+type UsageRow = {
+  five?: Limit;
+  week?: Limit;
+  scoped?: Record<string, Limit>;
+  credits?: Credits;
+};
 
 function resetEpoch(v: any): number | undefined {
   if (typeof v === "number") return v;
@@ -669,12 +676,30 @@ function asLimit(l: any): Limit | undefined {
   return { pct: l.percent, reset: resetEpoch(l.resets_at) };
 }
 
+// An enterprise seat billed per use (profile `seat_tier`
+// enterprise_usage_based, `rate_limit_tier` default_claude_zero) has no
+// session or weekly window at all: the endpoint returns `limits: []` with
+// every window null, and its requests come back with
+// `anthropic-ratelimit-unified-representative-claim: overage`. The credit
+// pool is what meters it, and `spend.enabled` marks the pool as the live
+// meter — on plan accounts it is off, and the windows above are the truth.
+function parseCredits(spend: any): Credits | undefined {
+  if (spend?.enabled !== true || typeof spend.percent !== "number") return undefined;
+  const money = (m: any) =>
+    typeof m?.amount_minor === "number" ? m.amount_minor / 10 ** (m.exponent ?? 2) : undefined;
+  const used = money(spend.used);
+  const limit = money(spend.limit);
+  if (used === undefined || limit === undefined) return undefined;
+  return { pct: spend.percent, used, limit, currency: spend.used?.currency ?? "USD" };
+}
+
 function parseLimits(body: any): UsageRow | null {
   const limits = Array.isArray(body?.limits) ? body.limits : null;
-  if (!limits) return null;
-  const pick = (kind: string) => asLimit(limits.find((l: any) => l.kind === kind));
+  const credits = parseCredits(body?.spend);
+  if (!limits && !credits) return null;
+  const pick = (kind: string) => asLimit(limits?.find((l: any) => l.kind === kind));
   const scoped: Record<string, Limit> = {};
-  for (const l of limits) {
+  for (const l of limits ?? []) {
     if (l.kind !== "weekly_scoped") continue;
     const limit = asLimit(l);
     if (limit) scoped[l.scope?.model?.display_name ?? l.scope?.surface ?? "scoped"] = limit;
@@ -683,6 +708,7 @@ function parseLimits(body: any): UsageRow | null {
     five: pick("session"),
     week: pick("weekly_all"),
     scoped: Object.keys(scoped).length ? scoped : undefined,
+    credits,
   };
 }
 
@@ -701,6 +727,11 @@ function humanUntil(epoch: number): string {
 function fmtLimit(label: string, limit: Limit | undefined): string {
   if (!limit) return `${label} ?`;
   return `${label} ${limit.pct}%${limit.reset ? ` (${humanUntil(limit.reset)})` : ""}`;
+}
+
+function fmtCredits(c: Credits): string {
+  const money = (v: number) => v.toLocaleString("en-US", { style: "currency", currency: c.currency });
+  return `credits ${c.pct}% (${money(c.used)}/${money(c.limit)})`;
 }
 
 async function cmdUsage(args: string[]) {
@@ -764,11 +795,14 @@ async function cmdUsage(args: string[]) {
   if (args.includes("--json")) console.log(JSON.stringify(out));
   else {
     for (const [name, u] of Object.entries(out)) {
-      const parts = [fmtLimit("5h", u.five), fmtLimit("7d", u.week)];
+      // An account with no windows at all is not a withheld reading, so it
+      // gets no "5h ?" placeholder — only whatever meter it does have.
+      const parts = u.five || u.week ? [fmtLimit("5h", u.five), fmtLimit("7d", u.week)] : [];
       for (const [model, limit] of Object.entries(u.scoped ?? {})) {
         parts.push(fmtLimit(model, limit));
       }
-      console.log(`${name.padEnd(16)} ${parts.join("  ")}`);
+      if (u.credits) parts.push(fmtCredits(u.credits));
+      console.log(`${name.padEnd(16)} ${parts.length ? parts.join("  ") : "no limits reported"}`);
     }
   }
 }

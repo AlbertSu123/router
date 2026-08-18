@@ -8,16 +8,18 @@ struct Profile: Identifiable, Equatable {
     var id: String { name }
 }
 
-// One rate limit as the usage endpoint reports it: a percentage of the
-// window consumed, and when that window resets.
+// One limit as the usage endpoint reports it: a percentage consumed, and a
+// note on the rest of it — when the window resets, or for a credit pool,
+// the money behind the percentage.
 struct UsageLimit: Equatable {
     let label: String
     let pct: Int
     let reset: Double?
+    let detail: String?
 
     var text: String {
-        guard let reset else { return "\(label) \(pct)%" }
-        return "\(label) \(pct)% (\(Self.until(reset)))"
+        guard let note = detail ?? reset.map(Self.until) else { return "\(label) \(pct)%" }
+        return "\(label) \(pct)% (\(note))"
     }
 
     private static func until(_ epoch: Double) -> String {
@@ -37,18 +39,23 @@ struct Usage: Equatable {
     let five: UsageLimit?
     let week: UsageLimit?
     let scoped: [UsageLimit]
+    // Accounts metered on spend rather than on windows report this instead
+    // of the two above, never alongside them.
+    let credits: UsageLimit?
 
-    var isEmpty: Bool { five == nil && week == nil && scoped.isEmpty }
+    var isEmpty: Bool { five == nil && week == nil && scoped.isEmpty && credits == nil }
 
     // Every limit the endpoint reported, for the account row.
     var summary: String {
-        ([five, week].compactMap { $0 } + scoped).map(\.text).joined(separator: " · ")
+        ([five, week].compactMap { $0 } + scoped + [credits].compactMap { $0 })
+            .map(\.text).joined(separator: " · ")
     }
 
     // The menu bar has room for one number. The 5-hour window is the one
     // that stops the next request; the weekly only stands in when the
-    // endpoint withheld the session limit.
-    var headline: UsageLimit? { five ?? week }
+    // endpoint withheld the session limit, and the credit pool when the
+    // account has no windows to withhold.
+    var headline: UsageLimit? { five ?? week ?? credits }
 }
 
 // Reads router state from disk for display. Switching, healing, and the
@@ -120,7 +127,8 @@ final class ProfileStore {
             let row = Usage(
                 five: Self.limit("5h", limits["five"]),
                 week: Self.limit("7d", limits["week"]),
-                scoped: scoped.keys.sorted().compactMap { Self.limit($0, scoped[$0]) })
+                scoped: scoped.keys.sorted().compactMap { Self.limit($0, scoped[$0]) },
+                credits: Self.credits(limits["credits"]))
             if !row.isEmpty { next[name] = row }
         }
         if next != usage { usage = next }
@@ -128,7 +136,24 @@ final class ProfileStore {
 
     private static func limit(_ label: String, _ raw: Any?) -> UsageLimit? {
         guard let limit = raw as? [String: Any], let pct = limit["pct"] as? Double else { return nil }
-        return UsageLimit(label: label, pct: Int(pct), reset: limit["reset"] as? Double)
+        return UsageLimit(
+            label: label, pct: Int(pct), reset: limit["reset"] as? Double, detail: nil)
+    }
+
+    private static func credits(_ raw: Any?) -> UsageLimit? {
+        guard let credits = raw as? [String: Any],
+              let pct = credits["pct"] as? Double,
+              let used = credits["used"] as? Double,
+              let cap = credits["limit"] as? Double else { return nil }
+        let money = NumberFormatter()
+        money.numberStyle = .currency
+        money.currencyCode = credits["currency"] as? String ?? "USD"
+        let amount = { (value: Double) in
+            money.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
+        }
+        return UsageLimit(
+            label: "credits", pct: Int(pct), reset: nil,
+            detail: "\(amount(used))/\(amount(cap))")
     }
 
     // Starts a sign-in: the CLI mints the PKCE URL, the browser opens it.

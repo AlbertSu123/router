@@ -15,7 +15,8 @@ when a sign-in needs my browser.
 - Accounts are identified by email. Tokens live in the macOS Keychain.
 - Adding an account is one browser sign-in. Switching never asks you to
   log in again.
-- The menu shows usage limits (5-hour and 7-day) per account.
+- The menu shows usage limits (5-hour and 7-day) per account, or the credit
+  pool for accounts billed per use instead of by plan window.
 
 ## Manual install
 
