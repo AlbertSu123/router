@@ -84,13 +84,28 @@ final class ProfileStore {
     private(set) var profiles: [Profile] = []
     private(set) var codexProfiles: [Profile] = []
 
-    // The menu bar carries a mark per tool and the one number that matters,
+    // The menu bar item draws its own text, so it needs the appearance the
+    // menu bar is actually using. That is not the app's: a light wallpaper
+    // tints the bar light while the system runs dark, which is why every
+    // other item draws a template image and lets AppKit recolor it.
+    private(set) var barAppearance = ProfileStore.statusBarAppearance()
+
+    // The menu bar carries a mark per tool and the one limit that matters,
     // no account names — those are a click away, where there is room for
     // them. Codex appears once an account is signed in to it.
     var hasCodex: Bool { !codexProfiles.isEmpty }
 
-    func headlinePct(_ tool: Tool) -> Int? {
-        activeID(tool).flatMap { usage[$0]?.headline?.pct }
+    func headline(_ tool: Tool) -> UsageLimit? {
+        activeID(tool).flatMap { usage[$0]?.headline }
+    }
+
+    // NSApp is still nil while this store is being built, so the shared
+    // instance is asked instead; the status item's window only exists once
+    // the scene is up, and the poll picks it up on a later tick.
+    private static func statusBarAppearance() -> NSAppearance {
+        let app = NSApplication.shared
+        return app.windows.first { $0.className == "NSStatusBarWindow" }?.effectiveAppearance
+            ?? app.effectiveAppearance
     }
 
     private func activeID(_ tool: Tool) -> String? {
@@ -117,6 +132,8 @@ final class ProfileStore {
         if codexRows != codexProfiles { codexProfiles = codexRows }
         let codexName = readCodexCurrent()
         if codexName != codexCurrent { codexCurrent = codexName }
+        let bar = Self.statusBarAppearance()
+        if bar.name != barAppearance.name { barAppearance = bar }
     }
 
     func isCurrent(_ profile: Profile) -> Bool {

@@ -1,9 +1,10 @@
 import AppKit
 import SwiftUI
 
-// One segment per tool: its mark, and how much of the active account's
-// window is spent. Which account that is belongs in the panel, where the
-// full address fits and clicking it means something.
+// One segment per tool: its mark, and the limit that would stop the next
+// request — which window it covers and how much of it is spent. Which
+// account that is belongs in the panel, where the full address fits and
+// clicking it means something.
 //
 // The label is drawn as a single image on purpose. A MenuBarExtra label
 // built from stacks is measured before its content settles and then clipped
@@ -12,16 +13,9 @@ import SwiftUI
 // only shape that reliably sizes itself.
 struct MenuBarLabel: View {
     let store: ProfileStore
-    // The marks are the apps' own icons, so the label cannot be a template
-    // image that macOS would recolor — the text color has to be chosen. This
-    // is read only to re-render the label when the appearance changes: inside
-    // a MenuBarExtra label SwiftUI reports .dark whatever the menu bar is
-    // actually doing, so the color itself comes from the app's appearance.
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let _ = scheme
-        return Image(nsImage: MenuBarRender.label(segments))
+        Image(nsImage: MenuBarRender.label(segments, appearance: store.barAppearance))
     }
 
     // Before the first usage fetch lands a segment is a mark and no number,
@@ -33,10 +27,11 @@ struct MenuBarLabel: View {
     }
 
     private func segment(_ tool: Tool) -> MenuBarRender.Segment {
-        MenuBarRender.Segment(
+        let limit = store.headline(tool)
+        return MenuBarRender.Segment(
             icon: Brand.icon(for: tool),
             fallback: tool == .claude ? "C" : "G",
-            pct: store.headlinePct(tool))
+            usage: limit.map { "\($0.label) \($0.pct)%" })
     }
 }
 
@@ -45,12 +40,15 @@ enum MenuBarRender {
     struct Segment {
         let icon: NSImage?
         let fallback: String
-        let pct: Int?
+        let usage: String?
     }
 
     private static let iconSize: CGFloat = 15
 
-    static func label(_ segments: [Segment]) -> NSImage {
+    // The marks are the apps' own icons, so this cannot be a template image
+    // that AppKit would recolor; the text color is chosen here instead,
+    // under whatever appearance the menu bar is itself drawing in.
+    static func label(_ segments: [Segment], appearance: NSAppearance) -> NSImage {
         let font = NSFont.menuBarFont(ofSize: 0)
         // labelColor is dynamic: it resolves when the line is drawn, under
         // the appearance set below.
@@ -68,14 +66,13 @@ enum MenuBarRender {
             } else {
                 line.append(NSAttributedString(string: segment.fallback, attributes: attributes))
             }
-            if let pct = segment.pct {
-                line.append(NSAttributedString(string: " \(pct)%", attributes: attributes))
+            if let usage = segment.usage {
+                line.append(NSAttributedString(string: " \(usage)", attributes: attributes))
             }
         }
         let size = NSSize(width: ceil(line.size().width), height: ceil(line.size().height))
         // The drawing handler runs again per scale factor, so the marks stay
         // sharp on a Retina display.
-        let appearance = NSApp.effectiveAppearance
         return NSImage(size: size, flipped: false) { rect in
             appearance.performAsCurrentDrawingAppearance {
                 line.draw(in: rect)
