@@ -1,11 +1,23 @@
 import AppKit
 import Observation
 
+// Which CLI an account signs in to. The two are switched independently and
+// the CLI addresses a Codex profile by its prefixed id.
+enum Tool: String, Equatable {
+    case claude
+    case codex
+
+    var title: String { self == .claude ? "Claude" : "Codex" }
+    // How the CLI addresses a profile of this tool.
+    var prefix: String { self == .codex ? "codex:" : "" }
+}
+
 struct Profile: Identifiable, Equatable {
+    let tool: Tool
     let name: String
     let email: String?
 
-    var id: String { name }
+    var id: String { tool.prefix + name }
 }
 
 // One limit as the usage endpoint reports it: a percentage consumed, and a
@@ -64,22 +76,38 @@ struct Usage: Equatable {
 @Observable
 final class ProfileStore {
     private(set) var current = "main"
+    // The Codex account auth.json holds, or nil when Codex is logged out.
+    private(set) var codexCurrent: String?
     // What the menu bar shows: the account email's local part when known.
     private(set) var currentLabel = "main"
-    // Limits per profile name, refreshed from `router usage --json`.
+    // Limits per profile id, refreshed from `router usage --json`.
     private(set) var usage: [String: Usage] = [:]
     // Observed so the menu picks up an account added while it is open.
     private(set) var profiles: [Profile] = []
+    private(set) var codexProfiles: [Profile] = []
 
-    // The menu bar item: account, and how much of its window is spent.
+    // The menu bar item: the active account per tool, and how much of its
+    // window is spent. Codex only appears once an account is signed in to
+    // it, so a Claude-only setup reads exactly as it did before.
     var menuBarTitle: String {
-        guard let headline = usage[current]?.headline else { return currentLabel }
-        return "\(currentLabel) \(headline.pct)%"
+        var title = segment(label: currentLabel, id: current)
+        if let codexCurrent {
+            title += " · " + segment(label: shortLabel(codexEmail(codexCurrent), codexCurrent),
+                                     id: Tool.codex.prefix + codexCurrent)
+        }
+        return title
+    }
+
+    private func segment(label: String, id: String) -> String {
+        guard let headline = usage[id]?.headline else { return label }
+        return "\(label) \(headline.pct)%"
     }
 
     private let dir = NSHomeDirectory() + "/.router"
     private var currentFile: String { dir + "/current" }
     private var profilesFile: String { dir + "/profiles.json" }
+    private var codexCurrentFile: String { dir + "/codex-current" }
+    private var codexProfilesFile: String { dir + "/codex-profiles.json" }
     private var claudeConfig: String { NSHomeDirectory() + "/.claude.json" }
 
     init() {
@@ -93,23 +121,44 @@ final class ProfileStore {
         if label != currentLabel { currentLabel = label }
         let rows = readProfiles()
         if rows != profiles { profiles = rows }
+        let codexRows = readCodexProfiles()
+        if codexRows != codexProfiles { codexProfiles = codexRows }
+        let codexName = readCodexCurrent()
+        if codexName != codexCurrent { codexCurrent = codexName }
+    }
+
+    func isCurrent(_ profile: Profile) -> Bool {
+        profile.tool == .codex ? codexCurrent == profile.name : current == profile.name
     }
 
     private func labelFor(_ name: String) -> String {
-        let email = name == "main" ? mainEmail() : profileEmail(name)
-        guard let email, let local = email.split(separator: "@").first else { return name }
-        return String(local)
+        shortLabel(name == "main" ? mainEmail() : profileEmail(name), name)
+    }
+
+    // Menu bar width is the constraint, so an account shows as the local
+    // part of its email, clipped.
+    private func shortLabel(_ email: String?, _ fallback: String) -> String {
+        guard let email, let local = email.split(separator: "@").first else { return fallback }
+        return local.count > 12 ? String(local.prefix(11)) + "…" : String(local)
     }
 
     private func profileEmail(_ name: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: profilesFile),
+        storedEmail(profilesFile, name)
+    }
+
+    private func codexEmail(_ name: String) -> String? {
+        storedEmail(codexProfilesFile, name)
+    }
+
+    private func storedEmail(_ path: String, _ name: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: path),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let stored = json["profiles"] as? [String: [String: Any]] else { return nil }
         return stored[name]?["email"] as? String
     }
 
-    func select(_ name: String) async {
-        _ = await Self.runCLI(["use", name])
+    func select(_ id: String) async {
+        _ = await Self.runCLI(["use", id])
         refresh()
     }
 
@@ -134,10 +183,14 @@ final class ProfileStore {
         if next != usage { usage = next }
     }
 
+    // A row carries its own window label when the provider's window lengths
+    // decide it (Codex plans differ in how long a window runs); otherwise
+    // the caller's name for the slot stands.
     private static func limit(_ label: String, _ raw: Any?) -> UsageLimit? {
         guard let limit = raw as? [String: Any], let pct = limit["pct"] as? Double else { return nil }
         return UsageLimit(
-            label: label, pct: Int(pct), reset: limit["reset"] as? Double, detail: nil)
+            label: limit["label"] as? String ?? label, pct: Int(pct),
+            reset: limit["reset"] as? Double, detail: nil)
     }
 
     private static func credits(_ raw: Any?) -> UsageLimit? {
@@ -195,17 +248,52 @@ final class ProfileStore {
         return (true, "Added \"\(name)\"" + (email.map { " (\($0))" } ?? ""))
     }
 
+    // Codex signs in through its own CLI, which opens the browser and waits
+    // for its callback, so there is no code to paste — this call runs for as
+    // long as the user takes. The command answers with one JSON line per
+    // event; the outcome is the last one.
+    func addCodex() async -> (ok: Bool, message: String) {
+        let failed = (false, "The Codex sign-in did not complete. Try again.")
+        guard let data = await Self.runCLI(["auth", "codex", "login"]),
+              let text = String(data: data, encoding: .utf8) else { return failed }
+        let events = text.split(separator: "\n").compactMap {
+            try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        guard let outcome = events.last(where: { $0["name"] != nil || $0["error"] != nil }) else {
+            return failed
+        }
+        if let error = outcome["error"] as? String { return (false, error) }
+        guard let name = outcome["name"] as? String else { return failed }
+        let email = outcome["email"] as? String
+        refresh()
+        return (true, "Added \"codex:\(name)\"" + (email.map { " (\($0))" } ?? ""))
+    }
+
+    // An abandoned sign-in holds Codex's callback port, which would make the
+    // next one fail, so closing the window calls it off.
+    func cancelCodexSignIn() async {
+        _ = await Self.runCLI(["auth", "codex", "cancel"])
+    }
+
     // Fresh from disk on every poll tick; the files are tiny.
     private func readProfiles() -> [Profile] {
-        var rows = [Profile(name: "main", email: mainEmail())]
-        if let data = FileManager.default.contents(atPath: profilesFile),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let stored = json["profiles"] as? [String: [String: Any]] {
-            for name in stored.keys.sorted() {
-                rows.append(Profile(name: name, email: stored[name]?["email"] as? String))
-            }
+        [Profile(tool: .claude, name: "main", email: mainEmail())]
+            + storedProfiles(profilesFile, .claude)
+    }
+
+    // Codex has no "main": every account it knows is a profile, adopted
+    // from ~/.codex/auth.json the first time router sees it.
+    private func readCodexProfiles() -> [Profile] {
+        storedProfiles(codexProfilesFile, .codex)
+    }
+
+    private func storedProfiles(_ path: String, _ tool: Tool) -> [Profile] {
+        guard let data = FileManager.default.contents(atPath: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let stored = json["profiles"] as? [String: [String: Any]] else { return [] }
+        return stored.keys.sorted().map {
+            Profile(tool: tool, name: $0, email: stored[$0]?["email"] as? String)
         }
-        return rows
     }
 
     nonisolated private static func runCLI(_ args: [String]) async -> Data? {
@@ -228,6 +316,12 @@ final class ProfileStore {
         guard let raw = try? String(contentsOfFile: currentFile, encoding: .utf8) else { return "main" }
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return name.isEmpty ? "main" : name
+    }
+
+    private func readCodexCurrent() -> String? {
+        guard let raw = try? String(contentsOfFile: codexCurrentFile, encoding: .utf8) else { return nil }
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
     }
 
     // While a profile is active, ~/.claude.json carries that profile's email

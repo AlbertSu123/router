@@ -28,13 +28,20 @@ struct RouterApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("Add Account", id: "add") {
+        Window("Add Claude Account", id: "add") {
             AddAccountView(store: store)
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
         // The app has no Dock icon, so a buried window is unfindable. Keep
         // it above the browser during the sign-in.
+        .windowLevel(.floating)
+
+        Window("Add Codex Account", id: "add-codex") {
+            AddCodexAccountView(store: store)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
         .windowLevel(.floating)
     }
 }

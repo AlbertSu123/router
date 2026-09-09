@@ -6,21 +6,28 @@ struct PanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(store.profiles) { profile in
-                AccountRow(
-                    profile: profile,
-                    isCurrent: store.current == profile.name,
-                    usage: store.usage[profile.name]?.summary
-                ) {
-                    Task { await store.select(profile.name) }
-                }
+            // The two tools are switched independently, so they are only
+            // told apart once Codex has an account; a Claude-only setup
+            // keeps the plain list it had.
+            if store.codexProfiles.isEmpty {
+                rows(store.profiles)
+            } else {
+                section(Tool.claude.title, store.profiles)
+                section(Tool.codex.title, store.codexProfiles)
             }
             Divider()
                 .padding(.vertical, 6)
             HStack {
-                Button("Add Account") {
-                    openWindow(id: "add")
-                    NSApplication.shared.activate(ignoringOtherApps: true)
+                if store.codexProfiles.isEmpty {
+                    Menu("Add Account") {
+                        Button("Claude Account…") { open("add") }
+                        Button("Codex Account…") { open("add-codex") }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                } else {
+                    Button("Add Claude") { open("add") }
+                    Button("Add Codex") { open("add-codex") }
                 }
                 Spacer()
                 Button("Quit") {
@@ -35,5 +42,34 @@ struct PanelView: View {
         .padding(10)
         .frame(width: 380)
         .task { await store.fetchUsage() }
+    }
+
+    @ViewBuilder
+    private func section(_ title: String, _ profiles: [Profile]) -> some View {
+        Text(title)
+            .font(.caption)
+            .fontWeight(.semibold)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.top, 4)
+        rows(profiles)
+    }
+
+    @ViewBuilder
+    private func rows(_ profiles: [Profile]) -> some View {
+        ForEach(profiles) { profile in
+            AccountRow(
+                profile: profile,
+                isCurrent: store.isCurrent(profile),
+                usage: store.usage[profile.id]?.summary
+            ) {
+                Task { await store.select(profile.id) }
+            }
+        }
+    }
+
+    private func open(_ id: String) {
+        openWindow(id: id)
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }

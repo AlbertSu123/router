@@ -1,7 +1,7 @@
 # router
 
-Switch Claude Code between Claude accounts from the macOS menu bar or the
-terminal.
+Switch Claude Code between Claude accounts, and Codex between ChatGPT
+accounts, from the macOS menu bar or the terminal.
 
 Paste this into your agent (Claude Code) to get set up:
 
@@ -11,12 +11,14 @@ install the router CLI and menu bar app. Verify each step. Stop and ask me
 when a sign-in needs my browser.
 ```
 
-- One click switches every session, running ones included.
-- Accounts are identified by email. Tokens live in the macOS Keychain.
+- One click switches every Claude Code session, running ones included.
+  Codex follows on the next session you start.
+- Accounts are identified by email. Credentials live in the macOS Keychain.
 - Adding an account is one browser sign-in. Switching never asks you to
   log in again.
-- The menu shows usage limits (5-hour and 7-day) per account, or the credit
-  pool for accounts billed per use instead of by plan window.
+- The menu shows usage limits (5-hour and 7-day, or whatever windows the
+  plan has) per account, or the credit pool for accounts billed per use
+  instead of by plan window.
 
 ## Manual install
 
@@ -38,17 +40,23 @@ terminal:
 
 ```bash
 router add              # browser sign-in; paste the code; done
-router use <name>       # switch every session to this account
+router add --codex      # browser sign-in for a ChatGPT account; nothing to paste
+router use <name>       # switch every Claude Code session to this account
 router use main         # back to the normal keychain login
+router use codex:<name> # switch Codex to this account
 router list             # all accounts, active one starred
 router usage            # usage limits per account
-router remove <name>    # delete an account's token
+router remove <name>    # delete an account's credential
 router doctor           # check the installation
 ```
 
 `router add` opens the Claude sign-in page. Sign in as the account you want
 to add. Use a private browser window for an account that is not your
 browser default. The profile takes its name from the account email.
+
+`router add --codex` hands the sign-in to `codex login` itself, pointed at a
+throwaway `CODEX_HOME`, so the account you are currently signed in to is
+never disturbed. Codex accounts are addressed as `codex:<name>` everywhere.
 
 ## How it works
 
@@ -64,8 +72,24 @@ browser default. The profile takes its name from the account email.
   swap. The menu bar app runs `router heal` every 10 seconds, which
   re-stashes the fresh credential and re-asserts your selection.
 
-State lives in `~/.router/` (no tokens on disk; tokens stay in the
-Keychain).
+Codex works the other way around, because it keeps its credential in a file
+rather than the Keychain:
+
+- `~/.codex/auth.json` is the source of truth for which ChatGPT account is
+  active. `heal` reads it, parks a copy of whatever it holds under that
+  account's profile (Keychain service `router-codex`), and points the menu
+  at it — so `codex login`, `codex logout`, and Codex's own token refreshes
+  are all picked up rather than fought.
+- A switch parks the live credential and writes the chosen profile's in its
+  place. There is no `main`: a parked Codex credential is the complete
+  `auth.json` Codex itself wrote, refresh token included, so every account
+  is a peer and none needs stashing.
+- Codex pins a session to the account it started with and refuses to reload
+  `auth.json` for a different account, so a switch lands on the next session
+  you start.
+
+State lives in `~/.router/` (no credentials on disk; they stay in the
+Keychain, except the one live `~/.codex/auth.json` that Codex reads).
 
 ## Statusline (optional)
 
@@ -96,8 +120,8 @@ Optional, feeds `router usage` for switched accounts: persist the
 router use main
 launchctl bootout "gui/$(id -u)/dev.bryan.router" 2>/dev/null
 rm -rf ~/Applications/Router.app ~/Library/LaunchAgents/dev.bryan.router.plist ~/.router
-# then delete the "router" and "router-stash" Keychain items and the
-# PATH line in ~/.zshrc
+# then delete the "router", "router-stash" and "router-codex" Keychain items
+# and the PATH line in ~/.zshrc
 ```
 
 ## Caveats
@@ -107,5 +131,9 @@ rm -rf ~/Applications/Router.app ~/Library/LaunchAgents/dev.bryan.router.plist ~
 - If a switched account stops authenticating, run `router use main` and
   re-add it (tokens can expire; `router heal` renews them when the sign-in
   returned a refresh token).
-- macOS only. Built for personal use; the credential layout it relies on
-  is Claude Code internal and can change.
+- A Codex switch does not reach a Codex session that is already running;
+  start a new one. Claude Code sessions do follow.
+- `router add --codex` needs the `codex` CLI on `PATH` (or `ROUTER_CODEX_BIN`
+  pointing at it) and, like `codex login` itself, a free port 1455.
+- macOS only. Built for personal use; the credential layouts it relies on
+  are Claude Code and Codex internals and can change.

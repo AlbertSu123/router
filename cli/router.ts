@@ -18,14 +18,29 @@
 // profile is active. `router heal` detects that (a router-made item never
 // has a refreshToken), re-stashes the fresh main credential, and re-asserts
 // the active profile. The menu bar app calls it periodically.
+//
+// Codex accounts work differently enough to live in ./codex.ts; this file
+// dispatches to it for anything named "codex:<profile>".
 
 import { mkdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
-const HOME = homedir();
-const DIR = join(HOME, ".router");
+import * as codex from "./codex.ts";
+import {
+  DIR,
+  HOME,
+  ensureDir,
+  fmtLimit,
+  keychainDelete,
+  keychainRead,
+  keychainWrite,
+  uniqueName,
+  type Credits,
+  type Limit,
+  type UsageRow,
+} from "./common.ts";
+
 const CURRENT_FILE = join(DIR, "current");
 const PROFILES_FILE = join(DIR, "profiles.json");
 const PENDING_FILE = join(DIR, "pending.json");
@@ -70,10 +85,6 @@ type Profile = {
 };
 type Profiles = Record<string, Profile>;
 
-function ensureDir() {
-  mkdirSync(DIR, { recursive: true, mode: 0o700 });
-}
-
 function loadProfiles(): Profiles {
   try {
     return JSON.parse(readFileSync(PROFILES_FILE, "utf8")).profiles ?? {};
@@ -99,29 +110,6 @@ function currentName(): string {
 function setCurrent(name: string) {
   ensureDir();
   writeFileSync(CURRENT_FILE, name + "\n", { mode: 0o600 });
-}
-
-// --- keychain ---------------------------------------------------------------
-
-function keychainRead(service: string, account: string): string | null {
-  const p = Bun.spawnSync(["security", "find-generic-password", "-s", service, "-a", account, "-w"]);
-  if (p.exitCode !== 0) return null;
-  const value = p.stdout.toString().replace(/\n$/, "");
-  return value || null;
-}
-
-// The value travels via argv, visible in ps for the milliseconds the call
-// runs; same exposure Claude Code's own credential tooling has on a
-// single-user Mac.
-function keychainWrite(service: string, account: string, value: string) {
-  const p = Bun.spawnSync([
-    "security", "add-generic-password", "-U", "-s", service, "-a", account, "-w", value,
-  ]);
-  if (p.exitCode !== 0) throw new Error(`keychain write failed: ${p.stderr.toString().trim()}`);
-}
-
-function keychainDelete(service: string, account: string) {
-  Bun.spawnSync(["security", "delete-generic-password", "-s", service, "-a", account]);
 }
 
 // A profile's keychain entry is JSON
@@ -434,21 +422,10 @@ async function refreshStoredToken(name: string, stored: StoredToken): Promise<St
 // refreshes its token under the existing name.
 async function saveNewProfile(redeemed: Redeemed): Promise<{ name: string; email?: string }> {
   const profiles = loadProfiles();
-  let name = redeemed.email
-    ? Object.entries(profiles).find(([, p]) => p.email === redeemed.email)?.[0]
-    : undefined;
-  if (!name) {
-    let base =
-      (redeemed.email ?? "")
-        .split("@")[0]!
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, "-")
-        .replace(/^[-_]+|[-_]+$/g, "")
-        .slice(0, 24) || "account";
-    if (base === MAIN) base = "account";
-    name = base;
-    for (let i = 2; profiles[name]; i++) name = `${base}${i}`;
-  }
+  const name =
+    (redeemed.email
+      ? Object.entries(profiles).find(([, p]) => p.email === redeemed.email)?.[0]
+      : undefined) ?? uniqueName(redeemed.email, new Set(Object.keys(profiles)), [MAIN]);
   const expiresAt = redeemed.expiresAt ?? Date.now() + YEAR_MS;
   writeToken(name, {
     accessToken: redeemed.token,
@@ -507,7 +484,13 @@ function switchTo(name: string) {
 
 function cmdUse(args: string[]) {
   const name = args[0];
-  if (!name) die("usage: router use <name|main>");
+  if (!name) die("usage: router use <name|main|codex:name>");
+  if (name.startsWith(codex.PREFIX)) {
+    const profile = name.slice(codex.PREFIX.length);
+    codex.use(profile);
+    console.log(`Switched Codex to "${profile}". Codex sessions you start from now on use it.`);
+    return;
+  }
   switchTo(name);
   console.log(`Switched to "${name}". Sessions pick it up on their next request (about 30s).`);
 }
@@ -580,9 +563,16 @@ async function cmdHeal(args: string[]) {
     patchAccount(loadProfiles()[cur]);
     say(`healed: updated the live credential for "${cur}"`);
   }
+
+  // Codex needs no re-assertion — its credential is a file nothing else
+  // rewrites behind router — but the file is where Codex leaves refreshed
+  // tokens and where `codex login` lands, so keep the parked copies and the
+  // active selection in step with it.
+  codex.heal();
 }
 
-async function cmdAdd() {
+async function cmdAdd(args: string[]) {
+  if (args.includes("--codex")) return cmdAddCodex();
   const { url } = authStart(true);
   console.log("Opening the Claude sign-in in your browser.");
   console.log("Tip: use a private window for an account that is not your browser default.\n");
@@ -593,6 +583,16 @@ async function cmdAdd() {
   const saved = await saveNewProfile(await authRedeem(code));
   console.log(`\nAdded ${saved.email ?? `"${saved.name}"`}.`);
   console.log(`Switch with: router use ${saved.name}`);
+}
+
+// The Codex sign-in is Codex's own: it opens the browser and waits for its
+// callback, so there is no code to paste here.
+async function cmdAddCodex() {
+  console.log("Opening the ChatGPT sign-in in your browser.");
+  console.log("Tip: use a private window for an account that is not your browser default.\n");
+  const added = await codex.add((url) => console.log(url + "\n"));
+  console.log(`Added ${added.email ?? `"${added.name}"`}${added.plan ? ` (${added.plan})` : ""}.`);
+  console.log(`Switch with: router use ${codex.PREFIX}${added.name}`);
 }
 
 // Machine surface for the menu bar app.
@@ -614,15 +614,37 @@ async function cmdAuth(args: string[]) {
     }
     return;
   }
-  die("usage: router auth start|redeem");
+  // The Codex sign-in has no code to paste: it runs to completion here and
+  // reports the account it landed on. The URL goes out first so a window
+  // driving this can offer it when the browser did not open.
+  if (sub === "codex") {
+    if (args[1] === "cancel") {
+      codex.cancelAdd();
+      return;
+    }
+    if (args[1] === "login") {
+      try {
+        const added = await codex.add((url) => console.log(JSON.stringify({ url })));
+        console.log(JSON.stringify({ name: added.name, email: added.email ?? null }));
+      } catch (e: any) {
+        console.log(JSON.stringify({ error: e.message ?? String(e) }));
+        process.exit(1);
+      }
+      return;
+    }
+    die("usage: router auth codex login|cancel");
+  }
+  die("usage: router auth start|redeem|codex");
 }
 
 function listData() {
   const current = currentName();
   const profiles = loadProfiles();
   const main = mainEmail() ?? undefined;
+  const codexList = codex.list();
   return {
     current,
+    codexCurrent: codexList.current,
     profiles: [
       { name: MAIN, label: labelFor(main, MAIN), email: main, current: current === MAIN },
       ...Object.entries(profiles).map(([name, p]) => ({
@@ -632,6 +654,7 @@ function listData() {
         current: current === name,
       })),
     ],
+    codex: codexList.profiles,
   };
 }
 
@@ -642,7 +665,10 @@ function cmdList(args: string[]) {
     return;
   }
   for (const p of data.profiles) {
-    console.log(`${p.current ? "*" : " "} ${p.name.padEnd(16)} ${p.label}`);
+    console.log(`${p.current ? "*" : " "} ${p.name.padEnd(20)} ${p.label}`);
+  }
+  for (const p of data.codex) {
+    console.log(`${p.current ? "*" : " "} ${p.id.padEnd(20)} ${p.label}${p.plan ? ` (${p.plan})` : ""}`);
   }
 }
 
@@ -655,15 +681,6 @@ function cmdList(args: string[]) {
 // rate-limits inference-scoped tokens, so whichever fetcher succeeds feeds
 // everyone. Fallbacks per account: that cache (2h), then the session-
 // reported limits the statusline persists (`rate-limits-<name>.json`, 24h).
-type Limit = { pct: number; reset?: number };
-type Credits = { pct: number; used: number; limit: number; currency: string };
-type UsageRow = {
-  five?: Limit;
-  week?: Limit;
-  scoped?: Record<string, Limit>;
-  credits?: Credits;
-};
-
 function resetEpoch(v: any): number | undefined {
   if (typeof v === "number") return v;
   if (typeof v !== "string") return undefined;
@@ -712,29 +729,13 @@ function parseLimits(body: any): UsageRow | null {
   };
 }
 
-function humanUntil(epoch: number): string {
-  const secs = Math.max(0, Math.floor(epoch - Date.now() / 1000));
-  if (secs >= 86400) return `${Math.floor(secs / 86400)}d`;
-  if (secs >= 3600) {
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    return m > 0 ? `${h}h${m}m` : `${h}h`;
-  }
-  if (secs >= 60) return `${Math.floor(secs / 60)}m`;
-  return "<1m";
-}
-
-function fmtLimit(label: string, limit: Limit | undefined): string {
-  if (!limit) return `${label} ?`;
-  return `${label} ${limit.pct}%${limit.reset ? ` (${humanUntil(limit.reset)})` : ""}`;
-}
-
 function fmtCredits(c: Credits): string {
   const money = (v: number) => v.toLocaleString("en-US", { style: "currency", currency: c.currency });
   return `credits ${c.pct}% (${money(c.used)}/${money(c.limit)})`;
 }
 
 async function cmdUsage(args: string[]) {
+  const codexRows = codex.usage();
   const item = readClaudeItem();
   const tokens: Record<string, string> = {};
   const mainToken = (isMainFamily(item) ? item : readStash())?.claudeAiOauth?.accessToken;
@@ -792,24 +793,36 @@ async function cmdUsage(args: string[]) {
       } catch {}
     }
   }
+  for (const [name, row] of Object.entries(await codexRows)) out[codex.PREFIX + name] = row;
+
   if (args.includes("--json")) console.log(JSON.stringify(out));
   else {
     for (const [name, u] of Object.entries(out)) {
       // An account with no windows at all is not a withheld reading, so it
       // gets no "5h ?" placeholder — only whatever meter it does have.
-      const parts = u.five || u.week ? [fmtLimit("5h", u.five), fmtLimit("7d", u.week)] : [];
+      const parts = u.exact
+        ? [u.five, u.week].flatMap((l) => (l ? [fmtLimit("window", l)] : []))
+        : u.five || u.week
+          ? [fmtLimit("5h", u.five), fmtLimit("7d", u.week)]
+          : [];
       for (const [model, limit] of Object.entries(u.scoped ?? {})) {
         parts.push(fmtLimit(model, limit));
       }
       if (u.credits) parts.push(fmtCredits(u.credits));
-      console.log(`${name.padEnd(16)} ${parts.length ? parts.join("  ") : "no limits reported"}`);
+      console.log(`${name.padEnd(20)} ${parts.length ? parts.join("  ") : "no limits reported"}`);
     }
   }
 }
 
 function cmdRemove(args: string[]) {
   const name = args[0];
-  if (!name || name === MAIN) die("usage: router remove <name>");
+  if (name?.startsWith(codex.PREFIX)) {
+    const profile = name.slice(codex.PREFIX.length);
+    codex.remove(profile);
+    console.log(`Removed "${name}".`);
+    return;
+  }
+  if (!name || name === MAIN) die("usage: router remove <name|codex:name>");
   const profiles = loadProfiles();
   if (!profiles[name]) die(`no profile "${name}"`);
   if (currentName() === name) {
@@ -859,34 +872,45 @@ async function cmdDoctor() {
 
   const app = Bun.spawnSync(["pgrep", "-x", "Router"]);
   report(app.exitCode === 0, "menu bar app is running");
+
+  codex.doctor(report);
   process.exit(ok ? 0 : 1);
 }
 
 function help() {
-  console.log(`router — switch Claude Code accounts
+  console.log(`router — switch Claude Code and Codex accounts
 
 usage:
-  router add              sign in and store a token for another account
-  router use <name|main>  switch every session to this account
+  router add              sign in and store a token for another Claude account
+  router add --codex      sign in and store a credential for another Codex account
+  router use <name|main>  switch every Claude Code session to this account
+  router use codex:<name> switch Codex to this account
   router list [--json]    show all accounts
   router usage [--json]   show usage limits per account
-  router remove <name>    delete an account's token
+  router remove <name>    delete an account's credential
   router heal [--quiet]   re-assert the active account after a refresh race
   router doctor           check the installation
 
-"main" is the normal keychain login. A switch swaps the keychain credential,
-so running sessions follow on their next request (about 30s).`);
+"main" is the normal Claude Code keychain login. A Claude switch swaps the
+keychain credential, so running sessions follow on their next request (about
+30s). A Codex switch swaps ~/.codex/auth.json; Codex pins a session to the
+account it started with, so it lands on the next session you start.`);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
-switch (cmd) {
-  case "add": await cmdAdd(); break;
-  case "use": cmdUse(rest); break;
-  case "heal": await cmdHeal(rest); break;
-  case "auth": await cmdAuth(rest); break;
-  case "list": cmdList(rest); break;
-  case "usage": await cmdUsage(rest); break;
-  case "remove": cmdRemove(rest); break;
-  case "doctor": await cmdDoctor(); break;
-  default: help(); process.exit(cmd ? 1 : 0);
+try {
+  switch (cmd) {
+    case "add": await cmdAdd(rest); break;
+    case "use": cmdUse(rest); break;
+    case "heal": await cmdHeal(rest); break;
+    case "auth": await cmdAuth(rest); break;
+    case "list": cmdList(rest); break;
+    case "usage": await cmdUsage(rest); break;
+    case "remove": cmdRemove(rest); break;
+    case "doctor": await cmdDoctor(); break;
+    default: help(); process.exit(cmd ? 1 : 0);
+  }
+} catch (e) {
+  if (!(e instanceof codex.CodexError)) throw e;
+  die(e.message);
 }
