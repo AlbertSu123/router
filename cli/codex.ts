@@ -33,7 +33,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   DIR,
@@ -386,30 +386,67 @@ function isExec(path: string): boolean {
   }
 }
 
+// The npm-installed codex is a `#!/usr/bin/env node` script, and the menu
+// bar app inherits launchd's PATH, which has no node in it. Whatever
+// runtime the CLI came with sits next to it, so its directory is added as a
+// last resort — appended, not prepended, because a codex that is itself a
+// PATH shim resolves the real one by looking further down the same PATH.
+function pathFor(bin: string): string {
+  return [process.env.PATH, dirname(bin)].filter(Boolean).join(":");
+}
+
+export function codexEnv(extra: Record<string, string> = {}): Record<string, string> {
+  return { ...process.env, ...extra, PATH: pathFor(codex().bin) } as Record<string, string>;
+}
+
+// A candidate counts as found only if it answers `--version`. Being on
+// PATH is not enough: a wrapper script that re-execs the real codex is
+// itself on PATH and fails when it cannot reach it, and asking is cheaper
+// than guessing which entry is a shim.
+function runs(bin: string): string | null {
+  if (!isExec(bin)) return null;
+  const p = Bun.spawnSync([bin, "--version"], { env: { ...process.env, PATH: pathFor(bin) } });
+  if (p.exitCode !== 0) return null;
+  return p.stdout.toString().trim().split("\n")[0] ?? "";
+}
+
+let resolved: { bin: string; version: string } | null = null;
+
 // The menu bar app inherits launchd's bare PATH, so a login shell lookup is
 // the first try and the usual install locations are the fallback.
-function codexBin(): string {
-  const explicit = process.env.ROUTER_CODEX_BIN;
-  if (explicit && isExec(explicit)) return explicit;
+export function codex(): { bin: string; version: string } {
+  if (resolved) return resolved;
+  const candidates: string[] = [];
+  if (process.env.ROUTER_CODEX_BIN) candidates.push(process.env.ROUTER_CODEX_BIN);
   // `whence -p` skips a shell function of the same name, which many
   // people wrap codex in.
   const shell = Bun.spawnSync(["/bin/zsh", "-lc", "whence -p codex"]);
   const found = shell.stdout.toString().trim().split("\n").pop()?.trim();
-  if (found && isExec(found)) return found;
-  const candidates = [
+  if (found) candidates.push(found);
+  candidates.push(
     "/opt/homebrew/bin/codex",
     "/usr/local/bin/codex",
     join(HOME, ".local/bin/codex"),
     join(HOME, ".bun/bin/codex"),
-  ];
+  );
   try {
     const nvm = join(HOME, ".nvm/versions/node");
     for (const version of readdirSync(nvm).sort().reverse()) {
       candidates.push(join(nvm, version, "bin/codex"));
     }
   } catch {}
-  for (const path of candidates) if (isExec(path)) return path;
-  fail("the codex CLI was not found — install it, or set ROUTER_CODEX_BIN to its path");
+  for (const bin of candidates) {
+    const version = runs(bin);
+    if (version !== null) {
+      resolved = { bin, version };
+      return resolved;
+    }
+  }
+  fail("no working codex CLI was found — install it, or set ROUTER_CODEX_BIN to its path");
+}
+
+function codexBin(): string {
+  return codex().bin;
 }
 
 // --- commands -------------------------------------------------------------------
@@ -424,7 +461,7 @@ export async function add(onUrl?: (url: string) => void): Promise<Added> {
   const bin = codexBin();
   const home = mkdtempSync(join(tmpdir(), "router-codex-"));
   const proc = Bun.spawn([bin, "login"], {
-    env: { ...process.env, CODEX_HOME: home },
+    env: codexEnv({ CODEX_HOME: home }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -432,7 +469,7 @@ export async function add(onUrl?: (url: string) => void): Promise<Added> {
   ensureDir();
   writeFileSync(LOGIN_PID_FILE, `${proc.pid}\n`, { mode: 0o600 });
 
-  const timer = setTimeout(() => proc.kill(), LOGIN_TIMEOUT_MS);
+  const timer = setTimeout(() => killLogin(proc.pid), LOGIN_TIMEOUT_MS);
   let stderr = "";
   const watch = (async () => {
     const decoder = new TextDecoder();
@@ -488,14 +525,47 @@ export async function add(onUrl?: (url: string) => void): Promise<Added> {
 // An abandoned sign-in keeps Codex's callback port bound, which makes the
 // next one fail, so the window that started it can call this off.
 export function cancelAdd() {
+  let pid = 0;
   try {
-    const pid = Number(readFileSync(LOGIN_PID_FILE, "utf8").trim());
-    // A stale pid file outlives the sign-in it named, and pids get reused,
-    // so the process has to still be the codex it claims to be.
-    const name = Bun.spawnSync(["ps", "-p", String(pid), "-o", "comm="]).stdout.toString();
-    if (pid > 0 && name.includes("codex")) process.kill(pid, "SIGTERM");
+    pid = Number(readFileSync(LOGIN_PID_FILE, "utf8").trim());
   } catch {}
   rmSync(LOGIN_PID_FILE, { force: true });
+  if (pid > 0) killLogin(pid);
+}
+
+// The npm-installed codex is a node script that re-execs the real binary,
+// so the process router spawned is not the one holding the callback port —
+// its grandchild is. Signalling only the child leaves 1455 bound and the
+// next sign-in fails.
+function killLogin(pid: number) {
+  // A stale pid file outlives the sign-in it named and pids get reused, so
+  // the process has to still be the codex it claims to be. `command`
+  // rather than `comm`: through the node shim, comm is just "node".
+  const command = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="]).stdout.toString();
+  if (!command.includes("codex")) return;
+  for (const target of [...descendants(pid).reverse(), pid]) {
+    try {
+      process.kill(target, "SIGTERM");
+    } catch {}
+  }
+}
+
+function descendants(root: number): number[] {
+  const children = new Map<number, number[]>();
+  for (const line of Bun.spawnSync(["ps", "-axo", "pid=,ppid="]).stdout.toString().split("\n")) {
+    const [pid, parent] = line.trim().split(/\s+/).map(Number);
+    if (!pid || !parent) continue;
+    children.set(parent, [...(children.get(parent) ?? []), pid]);
+  }
+  const found: number[] = [];
+  const walk = (pid: number) => {
+    for (const child of children.get(pid) ?? []) {
+      found.push(child);
+      walk(child);
+    }
+  };
+  walk(root);
+  return found;
 }
 
 export function use(name: string) {
@@ -555,11 +625,14 @@ export function doctor(report: (good: boolean, msg: string) => void) {
   const profiles = loadProfiles();
   if (!Object.keys(profiles).length && !readAuth()) return;
 
-  let bin: string | null = null;
+  // Resolution already means "answers --version", so this covers both
+  // finding the CLI and being able to run it — the npm build needs a node
+  // on PATH, which the menu bar app does not inherit.
+  let found: { bin: string; version: string } | null = null;
   try {
-    bin = codexBin();
+    found = codex();
   } catch {}
-  report(!!bin, `codex CLI found${bin ? ` (${bin})` : ""}`);
+  report(!!found, found ? `codex CLI runs (${found.version} — ${found.bin})` : "codex CLI runs");
 
   const auth = readAuth();
   report(!!auth, `${AUTH_FILE} readable`);
