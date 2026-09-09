@@ -78,29 +78,23 @@ final class ProfileStore {
     private(set) var current = "main"
     // The Codex account auth.json holds, or nil when Codex is logged out.
     private(set) var codexCurrent: String?
-    // What the menu bar shows: the account email's local part when known.
-    private(set) var currentLabel = "main"
     // Limits per profile id, refreshed from `router usage --json`.
     private(set) var usage: [String: Usage] = [:]
     // Observed so the menu picks up an account added while it is open.
     private(set) var profiles: [Profile] = []
     private(set) var codexProfiles: [Profile] = []
 
-    // The menu bar item: the active account per tool, and how much of its
-    // window is spent. Codex only appears once an account is signed in to
-    // it, so a Claude-only setup reads exactly as it did before.
-    var menuBarTitle: String {
-        var title = segment(label: currentLabel, id: current)
-        if let codexCurrent {
-            title += " · " + segment(label: shortLabel(codexEmail(codexCurrent), codexCurrent),
-                                     id: Tool.codex.prefix + codexCurrent)
-        }
-        return title
+    // The menu bar carries a mark per tool and the one number that matters,
+    // no account names — those are a click away, where there is room for
+    // them. Codex appears once an account is signed in to it.
+    var hasCodex: Bool { !codexProfiles.isEmpty }
+
+    func headlinePct(_ tool: Tool) -> Int? {
+        activeID(tool).flatMap { usage[$0]?.headline?.pct }
     }
 
-    private func segment(label: String, id: String) -> String {
-        guard let headline = usage[id]?.headline else { return label }
-        return "\(label) \(headline.pct)%"
+    private func activeID(_ tool: Tool) -> String? {
+        tool == .claude ? current : codexCurrent.map { Tool.codex.prefix + $0 }
     }
 
     private let dir = NSHomeDirectory() + "/.router"
@@ -117,8 +111,6 @@ final class ProfileStore {
     func refresh() {
         let name = readCurrent()
         if name != current { current = name }
-        let label = labelFor(name)
-        if label != currentLabel { currentLabel = label }
         let rows = readProfiles()
         if rows != profiles { profiles = rows }
         let codexRows = readCodexProfiles()
@@ -129,32 +121,6 @@ final class ProfileStore {
 
     func isCurrent(_ profile: Profile) -> Bool {
         profile.tool == .codex ? codexCurrent == profile.name : current == profile.name
-    }
-
-    private func labelFor(_ name: String) -> String {
-        shortLabel(name == "main" ? mainEmail() : profileEmail(name), name)
-    }
-
-    // Menu bar width is the constraint, so an account shows as the local
-    // part of its email, clipped.
-    private func shortLabel(_ email: String?, _ fallback: String) -> String {
-        guard let email, let local = email.split(separator: "@").first else { return fallback }
-        return local.count > 12 ? String(local.prefix(11)) + "…" : String(local)
-    }
-
-    private func profileEmail(_ name: String) -> String? {
-        storedEmail(profilesFile, name)
-    }
-
-    private func codexEmail(_ name: String) -> String? {
-        storedEmail(codexProfilesFile, name)
-    }
-
-    private func storedEmail(_ path: String, _ name: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: path),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let stored = json["profiles"] as? [String: [String: Any]] else { return nil }
-        return stored[name]?["email"] as? String
     }
 
     func select(_ id: String) async {

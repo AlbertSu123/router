@@ -8,8 +8,7 @@ struct RouterApp: App {
         MenuBarExtra {
             PanelView(store: store)
         } label: {
-            Label(store.menuBarTitle, systemImage: "person.crop.circle.badge.checkmark")
-                .labelStyle(.titleAndIcon)
+            MenuBarLabel(store: store)
                 .task {
                     // The CLI overwrites ~/.router/current in place, so a
                     // file watch on the directory misses it. A slow poll is

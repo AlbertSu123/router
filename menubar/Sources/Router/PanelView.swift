@@ -6,29 +6,17 @@ struct PanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            // The two tools are switched independently, so they are only
-            // told apart once Codex has an account; a Claude-only setup
-            // keeps the plain list it had.
-            if store.codexProfiles.isEmpty {
-                rows(store.profiles)
-            } else {
-                section(Tool.claude.title, store.profiles)
-                section(Tool.codex.title, store.codexProfiles)
+            // The two tools are switched independently, so each gets its own
+            // marked section. Codex appears once it has an account.
+            section(.claude, store.profiles)
+            if store.hasCodex {
+                section(.codex, store.codexProfiles)
             }
             Divider()
                 .padding(.vertical, 6)
-            HStack {
-                if store.codexProfiles.isEmpty {
-                    Menu("Add Account") {
-                        Button("Claude Account…") { open("add") }
-                        Button("Codex Account…") { open("add-codex") }
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                } else {
-                    Button("Add Claude") { open("add") }
-                    Button("Add Codex") { open("add-codex") }
-                }
+            HStack(spacing: 12) {
+                Button("Add Claude") { open("add") }
+                Button("Add Codex") { open("add-codex") }
                 Spacer()
                 Button("Quit") {
                     NSApplication.shared.terminate(nil)
@@ -45,18 +33,17 @@ struct PanelView: View {
     }
 
     @ViewBuilder
-    private func section(_ title: String, _ profiles: [Profile]) -> some View {
-        Text(title)
-            .font(.caption)
-            .fontWeight(.semibold)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.top, 4)
-        rows(profiles)
-    }
-
-    @ViewBuilder
-    private func rows(_ profiles: [Profile]) -> some View {
+    private func section(_ tool: Tool, _ profiles: [Profile]) -> some View {
+        HStack(spacing: 6) {
+            BrandIcon(tool: tool, size: 14)
+            Text(tool.title)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 4)
+        .padding(.bottom, 2)
         ForEach(profiles) { profile in
             AccountRow(
                 profile: profile,
