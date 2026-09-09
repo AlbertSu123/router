@@ -490,7 +490,10 @@ export async function add(onUrl?: (url: string) => void): Promise<Added> {
 export function cancelAdd() {
   try {
     const pid = Number(readFileSync(LOGIN_PID_FILE, "utf8").trim());
-    if (pid > 0) process.kill(pid, "SIGTERM");
+    // A stale pid file outlives the sign-in it named, and pids get reused,
+    // so the process has to still be the codex it claims to be.
+    const name = Bun.spawnSync(["ps", "-p", String(pid), "-o", "comm="]).stdout.toString();
+    if (pid > 0 && name.includes("codex")) process.kill(pid, "SIGTERM");
   } catch {}
   rmSync(LOGIN_PID_FILE, { force: true });
 }

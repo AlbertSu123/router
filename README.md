@@ -16,9 +16,13 @@ when a sign-in needs my browser.
 - Accounts are identified by email. Credentials live in the macOS Keychain.
 - Adding an account is one browser sign-in. Switching never asks you to
   log in again.
-- The menu shows usage limits (5-hour and 7-day, or whatever windows the
-  plan has) per account, or the credit pool for accounts billed per use
-  instead of by plan window.
+- The menu bar carries one segment per tool — that tool's icon, the window
+  it meters, and how much of it is spent (`5h 8%`, `7d 10%`). Account names
+  live in the panel behind it.
+- The panel lists every account with all of its limits: the 5-hour and
+  7-day windows, per-model windows, or the credit pool for accounts billed
+  per use instead of by plan window. Which windows exist is up to the plan,
+  and each is labelled with the period it actually covers.
 
 ## Manual install
 
