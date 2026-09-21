@@ -28,7 +28,7 @@ struct PanelView: View {
             .padding(.horizontal, 6)
         }
         .padding(10)
-        .frame(width: 380)
+        .frame(width: 440)
         .task { await store.fetchUsage() }
     }
 
@@ -48,7 +48,7 @@ struct PanelView: View {
             AccountRow(
                 profile: profile,
                 isCurrent: store.isCurrent(profile),
-                usage: store.usage[profile.id]?.summary
+                usage: store.usage[profile.id]
             ) {
                 Task { await store.select(profile.id) }
             }

@@ -16,6 +16,8 @@ struct MenuBarLabel: View {
 
     var body: some View {
         Image(nsImage: MenuBarRender.label(segments, appearance: store.barAppearance))
+            .accessibilityLabel("Router")
+            .help("Router — click for all accounts, usage limits, and reset expiration dates")
     }
 
     // Before the first usage fetch lands a segment is a mark and no number,
@@ -44,11 +46,19 @@ enum MenuBarRender {
     }
 
     private static let iconSize: CGFloat = 15
+    private static var cache: [String: NSImage] = [:]
 
     // The marks are the apps' own icons, so this cannot be a template image
     // that AppKit would recolor; the text color is chosen here instead,
     // under whatever appearance the menu bar is itself drawing in.
     static func label(_ segments: [Segment], appearance: NSAppearance) -> NSImage {
+        // MenuBarExtra must receive the same NSImage instance for unchanged
+        // content. Regenerating it during layout can trigger a rendering loop.
+        // Keep timers out of the label; the store already polls usage.
+        let key = appearance.name.rawValue + "|" + segments.map {
+            $0.fallback + ":" + ($0.usage ?? "")
+        }.joined(separator: "|")
+        if let image = cache[key] { return image }
         let font = NSFont.menuBarFont(ofSize: 0)
         // labelColor is dynamic: it resolves when the line is drawn, under
         // the appearance set below.
@@ -73,12 +83,15 @@ enum MenuBarRender {
         let size = NSSize(width: ceil(line.size().width), height: ceil(line.size().height))
         // The drawing handler runs again per scale factor, so the marks stay
         // sharp on a Retina display.
-        return NSImage(size: size, flipped: false) { rect in
+        let image = NSImage(size: size, flipped: false) { rect in
             appearance.performAsCurrentDrawingAppearance {
                 line.draw(in: rect)
             }
             return true
         }
+        if cache.count >= 32 { cache.removeAll() }
+        cache[key] = image
+        return image
     }
 
     private static func attachment(_ icon: NSImage, font: NSFont) -> NSTextAttachment {

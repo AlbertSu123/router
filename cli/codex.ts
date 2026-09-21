@@ -22,6 +22,9 @@
 // different account_id ("Skipping auth reload due to account id mismatch"),
 // so a switch lands on the next session you start, not the one you are in.
 
+import { parseResetCredits } from "./codex-resets.ts";
+import { deviceChallenge } from "./codex-login.ts";
+
 import {
   mkdirSync,
   mkdtempSync,
@@ -55,6 +58,8 @@ const AUTH_FILE = join(CODEX_HOME, "auth.json");
 const PROFILES_FILE = join(DIR, "codex-profiles.json");
 const CURRENT_FILE = join(DIR, "codex-current");
 const LOGIN_PID_FILE = join(DIR, "codex-login.pid");
+const LOGIN_SESSION_FILE = join(DIR, "codex-login-session");
+const LOGIN_STATUS_FILE = join(DIR, "codex-login-status.json");
 const CACHE_DIR = join(DIR, "cache");
 const SERVICE = "router-codex";
 
@@ -64,7 +69,8 @@ const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const USAGE_URL = "https://chatgpt.com/backend-api/codex/usage";
 const REFRESH_SCOPE = "openid profile email offline_access";
-const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+// Let Codex enforce its 15-minute device-code expiry; allow startup overhead.
+const LOGIN_TIMEOUT_MS = 16 * 60 * 1000;
 const REFRESH_MARGIN_MS = 30 * 60 * 1000;
 const USAGE_CACHE_MS = 2 * 3600 * 1000;
 
@@ -308,14 +314,16 @@ function windowsOf(rateLimit: any): Limit[] {
 }
 
 function parseUsage(body: any): UsageRow | null {
+  const resets = parseResetCredits(body?.rate_limit_reset_credits, body?.router_reset_details);
   const [short, long] = windowsOf(body?.rate_limit);
   const scoped: Record<string, Limit> = {};
   for (const extra of Array.isArray(body?.additional_rate_limits) ? body.additional_rate_limits : []) {
     const limit = windowsOf(extra?.rate_limit)[0];
     if (limit) scoped[extra.limit_name ?? extra.metered_feature ?? "scoped"] = limit;
   }
-  if (!short && !long && !Object.keys(scoped).length) return null;
+  if (!short && !long && !Object.keys(scoped).length && !resets) return null;
   return {
+    resets,
     five: short,
     week: long,
     scoped: Object.keys(scoped).length ? scoped : undefined,
@@ -323,9 +331,9 @@ function parseUsage(body: any): UsageRow | null {
   };
 }
 
-async function fetchUsage(auth: Auth): Promise<any | null> {
+async function fetchUsage(auth: Auth, url = USAGE_URL): Promise<any | null> {
   try {
-    const r = await fetch(USAGE_URL, {
+    const r = await fetch(url, {
       headers: {
         Authorization: `Bearer ${auth.tokens!.access_token}`,
         "chatgpt-account-id": auth.tokens!.account_id,
@@ -358,9 +366,12 @@ export async function usage(): Promise<Record<string, UsageRow>> {
       const body = await fetchUsage(auth);
       const cache = join(CACHE_DIR, `codex-usage-${name}.json`);
       if (body) {
+        if (body.rate_limit_reset_credits?.available_count > 0) {
+          body.router_reset_details = await fetchUsage(auth, "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits");
+        }
         const row = parseUsage(body);
         if (row) {
-          out[name] = row;
+          out[name] = { ...row, observedAt: Date.now() / 1000, stale: false };
           writeFileSync(cache, JSON.stringify(body), { mode: 0o600 });
         }
         return;
@@ -368,7 +379,7 @@ export async function usage(): Promise<Record<string, UsageRow>> {
       try {
         if (Date.now() - statSync(cache).mtimeMs < USAGE_CACHE_MS) {
           const row = parseUsage(JSON.parse(readFileSync(cache, "utf8")));
-          if (row) out[name] = row;
+          if (row) out[name] = { ...row, observedAt: statSync(cache).mtimeMs / 1000, stale: true };
         }
       } catch {}
     }),
@@ -457,10 +468,36 @@ export type Added = { name: string; email?: string; plan?: string };
 // callback port, and opens the browser. Pointing it at a throwaway
 // CODEX_HOME means the live credential is never touched — the new account
 // lands in a temp auth.json that router reads and parks.
-export async function add(onUrl?: (url: string) => void): Promise<Added> {
+export async function add(onUrl?: (url: string) => void, device = false, session = "cli", onCode?: (code: string) => void, replace = false): Promise<Added> {
   const bin = codexBin();
+  ensureDir();
+  if (replace) {
+    cancelAdd();
+    // Wait for the old command to finish its cleanup before publishing a new
+    // PID/challenge, otherwise its finally block could erase the new request.
+    for (let attempt = 0; attempt < 100; attempt++) {
+      let oldPid = 0;
+      try { oldPid = Number(readFileSync(LOGIN_PID_FILE, "utf8").trim()); } catch { break; }
+      const command = Bun.spawnSync(["ps", "-p", String(oldPid), "-o", "command="]).stdout.toString();
+      if (!command.includes("codex")) {
+        // Allow the parent to drain its pipes and remove the old state.
+        await Bun.sleep(200);
+        rmSync(LOGIN_PID_FILE, { force: true });
+        break;
+      }
+      await Bun.sleep(50);
+    }
+  }
+  try {
+    const pid = Number(readFileSync(LOGIN_PID_FILE, "utf8").trim());
+    if (pid > 0) {
+      try { process.kill(pid, 0); fail("A Codex sign-in is already running. Close it before starting another."); }
+      catch (e) { if (e instanceof CodexError) throw e; }
+    }
+  } catch (e) { if (e instanceof CodexError) throw e; }
+  rmSync(LOGIN_STATUS_FILE, { force: true });
   const home = mkdtempSync(join(tmpdir(), "router-codex-"));
-  const proc = Bun.spawn([bin, "login"], {
+  const proc = Bun.spawn([bin, "login", "-c", 'cli_auth_credentials_store="file"', ...(device ? ["--device-auth"] : [])], {
     env: codexEnv({ CODEX_HOME: home }),
     stdin: "ignore",
     stdout: "pipe",
@@ -468,28 +505,48 @@ export async function add(onUrl?: (url: string) => void): Promise<Added> {
   });
   ensureDir();
   writeFileSync(LOGIN_PID_FILE, `${proc.pid}\n`, { mode: 0o600 });
+  writeFileSync(LOGIN_SESSION_FILE, session, { mode: 0o600 });
 
   const timer = setTimeout(() => killLogin(proc.pid), LOGIN_TIMEOUT_MS);
   let stderr = "";
-  const watch = (async () => {
+  let announced = false;
+  const watch = async (stream: ReadableStream<Uint8Array>) => {
     const decoder = new TextDecoder();
-    let announced = false;
-    for await (const chunk of proc.stderr as ReadableStream<Uint8Array>) {
-      stderr += decoder.decode(chunk, { stream: true });
-      const url = announced ? null : stderr.match(/https:\/\/auth\.openai\.com\/\S+/)?.[0];
-      if (url) {
-        announced = true;
-        onUrl?.(url);
+    let output = "";
+    for await (const chunk of stream) {
+      output += decoder.decode(chunk, { stream: true });
+      if (stream === proc.stderr) stderr = output;
+      if (announced) continue;
+      if (device) {
+        const challenge = deviceChallenge(output);
+        if (challenge) {
+          announced = true;
+          writeFileSync(LOGIN_STATUS_FILE, JSON.stringify({ session, ...challenge }), { mode: 0o600 });
+          onUrl?.(challenge.url);
+          onCode?.(challenge.code);
+        }
+      } else {
+        const url = output.match(/https:\/\/auth\.openai\.com\/\S+/)?.[0];
+        if (url) { announced = true; onUrl?.(url); }
       }
     }
-  })();
+  };
 
   try {
-    await proc.exited;
-    await watch;
+    await Promise.all([proc.exited, watch(proc.stdout), watch(proc.stderr)]);
+  } catch {
+    killLogin(proc.pid);
+    rmSync(home, { recursive: true, force: true });
+    fail("The Codex sign-in was interrupted. Try again.");
   } finally {
     clearTimeout(timer);
-    rmSync(LOGIN_PID_FILE, { force: true });
+    try {
+      if (Number(readFileSync(LOGIN_PID_FILE, "utf8").trim()) === proc.pid) {
+        rmSync(LOGIN_PID_FILE, { force: true });
+        rmSync(LOGIN_STATUS_FILE, { force: true });
+        rmSync(LOGIN_SESSION_FILE, { force: true });
+      }
+    } catch {}
   }
 
   let auth: Auth | null = null;
@@ -524,12 +581,16 @@ export async function add(onUrl?: (url: string) => void): Promise<Added> {
 
 // An abandoned sign-in keeps Codex's callback port bound, which makes the
 // next one fail, so the window that started it can call this off.
-export function cancelAdd() {
+export function cancelAdd(session?: string) {
+  if (session) {
+    try { if (readFileSync(LOGIN_SESSION_FILE, "utf8") !== session) return; }
+    catch { return; }
+  }
   let pid = 0;
   try {
     pid = Number(readFileSync(LOGIN_PID_FILE, "utf8").trim());
   } catch {}
-  rmSync(LOGIN_PID_FILE, { force: true });
+  rmSync(LOGIN_STATUS_FILE, { force: true });
   if (pid > 0) killLogin(pid);
 }
 

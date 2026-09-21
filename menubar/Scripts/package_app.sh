@@ -26,7 +26,7 @@ if [[ ${#ARCH_LIST[@]} -eq 0 ]]; then
 fi
 
 for ARCH in "${ARCH_LIST[@]}"; do
-  swift build -c "$CONF" --arch "$ARCH"
+  swift build -c "$CONF" --arch "$ARCH" --scratch-path ".build/package-$ARCH"
 done
 
 APP="$ROOT/${APP_NAME}.app"
@@ -72,10 +72,12 @@ PLIST
 build_product_path() {
   local name="$1"
   local arch="$2"
-  case "$arch" in
-    arm64|x86_64) echo ".build/${arch}-apple-macosx/$CONF/$name" ;;
-    *) echo ".build/$CONF/$name" ;;
-  esac
+  # Swift 6.2 can use .build/out/Products instead of the legacy target
+  # triple directory. Ask Swift rather than accidentally shipping a stale binary.
+  local bin_dir
+  bin_dir=$(swift build -c "$CONF" --arch "$arch" \
+    --scratch-path ".build/package-$arch" --show-bin-path)
+  echo "$bin_dir/$name"
 }
 
 verify_binary_arches() {
@@ -140,7 +142,7 @@ if [[ ${#SWIFTPM_BUNDLES[@]} -gt 0 ]]; then
 fi
 
 # Embed frameworks if any exist in the build folder.
-FRAMEWORK_DIRS=(".build/$CONF" ".build/${ARCH_LIST[0]}-apple-macosx/$CONF")
+FRAMEWORK_DIRS=("$PREFERRED_BUILD_DIR")
 for dir in "${FRAMEWORK_DIRS[@]}"; do
   if compgen -G "${dir}/*.framework" >/dev/null; then
     cp -R "${dir}/"*.framework "$APP/Contents/Frameworks/"

@@ -5,16 +5,24 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 DIR="$HOME/.router"
 BIN="$DIR/bin"
+LIB="$DIR/lib"
 BUN="$(command -v bun || echo "$HOME/.bun/bin/bun")"
 [ -x "$BUN" ] || { echo "install: bun is required (https://bun.sh)" >&2; exit 1; }
 
-mkdir -p "$BIN"
+mkdir -p "$BIN" "$LIB"
+# A launchd app must not load executable code from the privacy-protected
+# Desktop checkout. Install its runtime alongside Router state instead.
+for source in "$REPO"/cli/*.ts; do
+  [[ "$source" == *.test.ts ]] && continue
+  cp "$source" "$LIB/$(basename "$source").tmp"
+  mv "$LIB/$(basename "$source").tmp" "$LIB/$(basename "$source")"
+done
 chmod 700 "$DIR"
 
 # Launcher with an absolute bun path so the menu bar app can call it too.
 cat > "$BIN/router" <<LAUNCHER
 #!/bin/sh
-exec "$BUN" "$REPO/cli/router.ts" "\$@"
+exec "$BUN" "$LIB/router.ts" "\$@"
 LAUNCHER
 chmod 755 "$BIN/router"
 

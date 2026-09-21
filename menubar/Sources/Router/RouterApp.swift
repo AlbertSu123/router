@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct RouterApp: App {
+    @NSApplicationDelegateAdaptor(RouterAppDelegate.self) private var delegate
     @State private var store = ProfileStore()
 
     var body: some Scene {
@@ -42,5 +43,28 @@ struct RouterApp: App {
         .windowResizability(.contentSize)
         .defaultPosition(.center)
         .windowLevel(.floating)
+    }
+}
+
+// Reopening Router (Finder, Spotlight, or accessibility tools) opens the same
+// account panel as its status item, instead of activating an app with no window.
+@MainActor
+final class RouterAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        for window in sender.windows {
+            if let button = statusButton(in: window.contentView) {
+                button.performClick(nil)
+                return false
+            }
+        }
+        return true
+    }
+
+    private func statusButton(in view: NSView?) -> NSStatusBarButton? {
+        if let button = view as? NSStatusBarButton { return button }
+        for child in view?.subviews ?? [] {
+            if let button = statusButton(in: child) { return button }
+        }
+        return nil
     }
 }

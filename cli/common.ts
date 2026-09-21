@@ -82,6 +82,9 @@ export function windowLabel(seconds: number): string {
 export type Limit = { pct: number; reset?: number; label?: string };
 export type Credits = { pct: number; used: number; limit: number; currency: string };
 export type UsageRow = {
+  resets?: import("./codex-resets.ts").ResetCredits;
+  observedAt?: number;
+  stale?: boolean;
   five?: Limit;
   week?: Limit;
   scoped?: Record<string, Limit>;

@@ -45,6 +45,7 @@ terminal:
 ```bash
 router add              # browser sign-in; paste the code; done
 router add --codex      # browser sign-in for a ChatGPT account; nothing to paste
+router add --codex --device-auth # authorize this Mac from another computer
 router use <name>       # switch every Claude Code session to this account
 router use main         # back to the normal keychain login
 router use codex:<name> # switch Codex to this account
@@ -61,6 +62,20 @@ browser default. The profile takes its name from the account email.
 `router add --codex` hands the sign-in to `codex login` itself, pointed at a
 throwaway `CODEX_HOME`, so the account you are currently signed in to is
 never disturbed. Codex accounts are addressed as `codex:<name>` everywhere.
+
+### Add a Codex account from another computer
+
+In the menu bar, choose **Add Codex → Another computer → Get sign-in code**.
+Use **Copy instructions** to give the account owner the link and one-time code.
+They sign in and approve access in their own browser; keep Router’s window open.
+Router stores the authorized account in this Mac’s Keychain, available for usage
+checks and switching. Adding it does not select it automatically. The other
+computer does not need Router or an SSH connection.
+
+The account must allow device code login in ChatGPT security settings or workspace
+permissions. Device codes expire 15 minutes after they are issued; cancel or retry to get a fresh code.
+This grants this Mac access to use the account; it does not run Codex on the other
+computer. The terminal equivalent is `router add --codex --device-auth`.
 
 ## How it works
 
@@ -138,6 +153,31 @@ rm -rf ~/Applications/Router.app ~/Library/LaunchAgents/dev.bryan.router.plist ~
 - A Codex switch does not reach a Codex session that is already running;
   start a new one. Claude Code sessions do follow.
 - `router add --codex` needs the `codex` CLI on `PATH` (or `ROUTER_CODEX_BIN`
-  pointing at it) and, like `codex login` itself, a free port 1455.
+  pointing at it) and a free port 1455 for browser sign-in. Device sign-in does not need that port.
 - macOS only. Built for personal use; the credential layouts it relies on
   are Claude Code and Codex internals and can change.
+
+## Banked Codex reset tracking
+
+Each Codex account shows its available banked resets, how many can be used now,
+and each reset's expiration date, local time zone, and live countdown. Reset
+credits are read from OpenAI alongside usage and refreshed about once a minute.
+Resets expiring within seven days are highlighted in the account list, even for
+inactive accounts.
+
+Unknown or partial expiration data is explicitly labeled. If a usage request
+fails, cached readings are marked and retained for at most two hours. Tracking
+never consumes a reset. Use Codex Settings → Usage to review and apply one.
+
+## Menu-bar visibility
+
+Router shows the Claude and OpenAI logos, each followed by the active usage
+window and percentage (for example, `5h 12%` or `7d 56%`). Click for all account
+usage and reset expiration details. The rendered label is cached and has no
+animation timer, preventing the previous rendering loop.
+Reopening Router from Finder or Spotlight opens the same account panel.
+
+Router starts at login and launchd relaunches it after a crash or abnormal exit.
+Choosing Quit intentionally stops it until you reopen it or log in again.
+macOS still controls menu-bar layout: Command-drag Router nearer the clock if
+other menu-bar items crowd it out. No app can reserve unlimited menu-bar space.

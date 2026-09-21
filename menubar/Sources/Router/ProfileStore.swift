@@ -48,6 +48,9 @@ struct UsageLimit: Equatable {
 }
 
 struct Usage: Equatable {
+    let resets: BankedResets?
+    let stale: Bool
+    let observedAt: Double?
     let five: UsageLimit?
     let week: UsageLimit?
     let scoped: [UsageLimit]
@@ -55,7 +58,7 @@ struct Usage: Equatable {
     // of the two above, never alongside them.
     let credits: UsageLimit?
 
-    var isEmpty: Bool { five == nil && week == nil && scoped.isEmpty && credits == nil }
+    var isEmpty: Bool { five == nil && week == nil && scoped.isEmpty && credits == nil && resets == nil }
 
     // Every limit the endpoint reported, for the account row.
     var summary: String {
@@ -94,6 +97,12 @@ final class ProfileStore {
     // no account names — those are a click away, where there is room for
     // them. Codex appears once an account is signed in to it.
     var hasCodex: Bool { !codexProfiles.isEmpty }
+
+    func expiringResetCount(at now: Date) -> Int {
+        codexProfiles.reduce(0) { total, profile in
+            total + (usage[profile.id]?.resets?.expiringCount(at: now) ?? 0)
+        }
+    }
 
     func headline(_ tool: Tool) -> UsageLimit? {
         activeID(tool).flatMap { usage[$0]?.headline }
@@ -157,6 +166,9 @@ final class ProfileStore {
         for (name, limits) in json {
             let scoped = limits["scoped"] as? [String: Any] ?? [:]
             let row = Usage(
+                resets: BankedResets(limits["resets"]),
+                stale: limits["stale"] as? Bool ?? false,
+                observedAt: limits["observedAt"] as? Double,
                 five: Self.limit("5h", limits["five"]),
                 week: Self.limit("7d", limits["week"]),
                 scoped: scoped.keys.sorted().compactMap { Self.limit($0, scoped[$0]) },
@@ -235,9 +247,9 @@ final class ProfileStore {
     // for its callback, so there is no code to paste — this call runs for as
     // long as the user takes. The command answers with one JSON line per
     // event; the outcome is the last one.
-    func addCodex() async -> (ok: Bool, message: String) {
+    func addCodex(device: Bool = false, session: String = "local") async -> (ok: Bool, message: String) {
         let failed = (false, "The Codex sign-in did not complete. Try again.")
-        guard let data = await Self.runCLI(["auth", "codex", "login"]),
+        guard let data = await Self.runCLI(["auth", "codex", "login", "--replace", "--session=\(session)"] + (device ? ["--device-auth"] : [])),
               let text = String(data: data, encoding: .utf8) else { return failed }
         let events = text.split(separator: "\n").compactMap {
             try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
@@ -254,8 +266,16 @@ final class ProfileStore {
 
     // An abandoned sign-in holds Codex's callback port, which would make the
     // next one fail, so closing the window calls it off.
-    func cancelCodexSignIn() async {
-        _ = await Self.runCLI(["auth", "codex", "cancel"])
+    func codexChallenge(session: String) -> (url: String, code: String)? {
+        guard let data = FileManager.default.contents(atPath: dir + "/codex-login-status.json"),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              value["session"] == session,
+              let url = value["url"], let code = value["code"] else { return nil }
+        return (url, code)
+    }
+
+    func cancelCodexSignIn(session: String) async {
+        _ = await Self.runCLI(["auth", "codex", "cancel", "--session=\(session)"])
     }
 
     // Fresh from disk on every poll tick; the files are tiny.

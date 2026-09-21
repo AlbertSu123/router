@@ -572,7 +572,7 @@ async function cmdHeal(args: string[]) {
 }
 
 async function cmdAdd(args: string[]) {
-  if (args.includes("--codex")) return cmdAddCodex();
+  if (args.includes("--codex")) return cmdAddCodex(args);
   const { url } = authStart(true);
   console.log("Opening the Claude sign-in in your browser.");
   console.log("Tip: use a private window for an account that is not your browser default.\n");
@@ -587,10 +587,11 @@ async function cmdAdd(args: string[]) {
 
 // The Codex sign-in is Codex's own: it opens the browser and waits for its
 // callback, so there is no code to paste here.
-async function cmdAddCodex() {
-  console.log("Opening the ChatGPT sign-in in your browser.");
+async function cmdAddCodex(args: string[]) {
+  const device = args.includes("--device-auth");
+  console.log(device ? "Authorize this Mac from another computer using the link and code below." : "Opening the ChatGPT sign-in in your browser.");
   console.log("Tip: use a private window for an account that is not your browser default.\n");
-  const added = await codex.add((url) => console.log(url + "\n"));
+  const added = await codex.add((url) => console.log(url + "\n"), device, "cli", (code) => console.log(`One-time code: ${code}`));
   console.log(`Added ${added.email ?? `"${added.name}"`}${added.plan ? ` (${added.plan})` : ""}.`);
   console.log(`Switch with: router use ${codex.PREFIX}${added.name}`);
 }
@@ -619,12 +620,12 @@ async function cmdAuth(args: string[]) {
   // driving this can offer it when the browser did not open.
   if (sub === "codex") {
     if (args[1] === "cancel") {
-      codex.cancelAdd();
+      codex.cancelAdd(args.find(a => a.startsWith("--session="))?.slice(10));
       return;
     }
     if (args[1] === "login") {
       try {
-        const added = await codex.add((url) => console.log(JSON.stringify({ url })));
+        const added = await codex.add((url) => console.log(JSON.stringify({ url })), args.includes("--device-auth"), args.find(a => a.startsWith("--session="))?.slice(10) ?? "cli", (code) => console.log(JSON.stringify({ code })), args.includes("--replace"));
         console.log(JSON.stringify({ name: added.name, email: added.email ?? null }));
       } catch (e: any) {
         console.log(JSON.stringify({ error: e.message ?? String(e) }));
@@ -809,6 +810,15 @@ async function cmdUsage(args: string[]) {
         parts.push(fmtLimit(model, limit));
       }
       if (u.credits) parts.push(fmtCredits(u.credits));
+      if (u.resets) {
+        parts.push(`${u.resets.available} banked resets`);
+        for (const credit of u.resets.credits) {
+          parts.push(credit.expiresAt === null ? "no expiration" : credit.expiresAt === undefined
+            ? "expiration unavailable" : `expires ${new Date(credit.expiresAt * 1000).toLocaleString()}`);
+        }
+        if (!u.resets.detailsComplete) parts.push("some expiration dates unavailable");
+        if (u.stale) parts.push("cached reset data");
+      }
       console.log(`${name.padEnd(20)} ${parts.length ? parts.join("  ") : "no limits reported"}`);
     }
   }
@@ -883,6 +893,7 @@ function help() {
 usage:
   router add              sign in and store a token for another Claude account
   router add --codex      sign in and store a credential for another Codex account
+  router add --codex --device-auth  sign in from another computer
   router use <name|main>  switch every Claude Code session to this account
   router use codex:<name> switch Codex to this account
   router list [--json]    show all accounts
