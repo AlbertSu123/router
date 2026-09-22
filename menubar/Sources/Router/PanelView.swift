@@ -97,6 +97,7 @@ struct PanelView: View {
             .padding(12)
         }
         .frame(width: 440)
+        .fitsHostingWindow()
         .task { await store.refreshMeter(); await store.fetchUsage() }
     }
 
