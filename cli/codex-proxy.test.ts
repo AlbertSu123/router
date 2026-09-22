@@ -89,3 +89,44 @@ test("enable/disable preserves unrelated config edits and the original provider"
   expect(restored).not.toContain("model_providers.router");
   expect(() => configureProxy('[model_providers.router]\nname = "existing"\n', 18789, "/tmp/router")).toThrow();
 });
+
+test("preserves compressed request framing without forwarding arbitrary auth", async () => {
+  const bytes = new Uint8Array([40, 181, 47, 253, 1, 2, 3]);
+  const handler = createProxyHandler({ token: "local", credential: async () => accounts.a!,
+    upstream: (async (_url, init) => {
+      const headers = new Headers(init!.headers);
+      expect(headers.get("content-encoding")).toBe("zstd");
+      expect(new Uint8Array(init!.body as ArrayBuffer)).toEqual(bytes);
+      return new Response("ok");
+    }) as typeof fetch });
+  expect((await handler(new Request("http://127.0.0.1/v1/responses", {method:"POST", headers:{authorization:"Bearer local","content-type":"application/json","content-encoding":"zstd"},body:bytes}))).status).toBe(200);
+});
+test("distinguishes client cancellation and records safe network codes without leaking error text", async () => {
+  const events: any[] = [];
+  const controller = new AbortController();
+  const handler = createProxyHandler({ token:"local",credential:async()=>accounts.a!,observe:e=>events.push(e),
+    upstream:(async()=>{throw Object.assign(new Error("secret request content"),{code:"ECONNRESET"})}) as typeof fetch });
+  const response = await handler(request());
+  expect(response.status).toBe(502);
+  expect(await response.text()).not.toContain("secret request content");
+  expect(events[0].failure).toBe("ECONNRESET");
+  controller.abort();
+  const canceled = await handler(new Request(request(),{signal:controller.signal}));
+  expect(canceled.status).toBe(499);
+  expect(events[1].failure).toBe("client_canceled");
+});
+test("compresses large conversation uploads losslessly and never retries failed inference", async () => {
+  const original = JSON.stringify({input:'Long conversation. '.repeat(10000)});
+  let calls = 0;
+  const handler = createProxyHandler({token:'local',credential:async()=>accounts.a!,upstream:(async(_url,init)=>{
+    calls++;
+    expect(new Headers(init!.headers).get('content-encoding')).toBe('zstd');
+    const wire = init!.body as Uint8Array;
+    expect(wire.byteLength).toBeLessThan(original.length / 10);
+    expect(new TextDecoder().decode(await Bun.zstdDecompress(wire))).toBe(original);
+    throw Object.assign(new Error('reset'),{code:'ECONNRESET'});
+  }) as typeof fetch});
+  const response = await handler(new Request('http://127.0.0.1/v1/responses',{method:'POST',headers:{authorization:'Bearer local','content-type':'application/json'},body:original}));
+  expect(response.status).toBe(502);
+  expect(calls).toBe(1);
+});

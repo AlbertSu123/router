@@ -26,9 +26,16 @@ struct RouterApp: App {
                     while !Task.isCancelled {
                         store.refresh()
                         if tick % 5 == 0 { await store.heal() }
-                        if tick % 30 == 0 { await store.fetchUsage() }
                         tick += 1
                         try? await Task.sleep(for: .seconds(2))
+                    }
+                }
+                .task {
+                    // Independent of healing and panel visibility; slow operations
+                    // cannot turn a 30-second usage poll into several minutes.
+                    while !Task.isCancelled {
+                        await store.fetchUsage()
+                        try? await Task.sleep(for: .seconds(30))
                     }
                 }
         }

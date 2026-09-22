@@ -35,7 +35,7 @@ export async function syncMeter(credentials:MeterCredential[]){
     const previous=old.find(m=>m.fingerprint===fp&&m.profile===credential.profile&&m.provider===credential.provider);
     if(previous&&Date.now()-previous.verifiedAt<10*60000){next.push(previous);continue}
     try{const proof=await meterAPI('/subscriptions/verify',credential,session);next.push({...proof,profile:credential.profile,fingerprint:fp,verifiedAt:Date.now()})}
-    catch{if(previous)next.push(previous);errors.push(`${credential.provider}:${credential.profile} needs subscription verification`)}
+    catch(e){if(previous)next.push(previous);errors.push(`${credential.provider}:${credential.profile}: ${e instanceof Error?e.message:"Subscription verification failed; retrying automatically"}`)}
   }
   // A sign-out or a new personal sign-in during this sync must not publish its mappings.
   if(meterSession()?.token!==session.token)return meterStatus();

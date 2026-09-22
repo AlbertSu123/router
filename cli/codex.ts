@@ -455,8 +455,13 @@ export async function usage(): Promise<Record<string, UsageRow>> {
       if (status === 401) {
         const next = await refreshBlob(name, auth);
         if (isSignedOut(name)) { out[name] = { signedOut: true }; return; }
-        if (next) { auth = next; ({ body } = await fetchUsageStatus(auth)); }
+        if (next) { auth = next; ({ status, body } = await fetchUsageStatus(auth)); }
       }
+      const error = status === 401 ? "Sign-in expired; reconnect this account"
+        : status === 403 ? "Provider denied usage access"
+        : status === 429 ? "Provider rate limited usage checks; retrying automatically"
+        : status === 0 ? "Usage request timed out or network unavailable"
+        : `Usage endpoint returned HTTP ${status}`;
       const cache = join(CACHE_DIR, `codex-usage-${name}.json`);
       if (body) {
         if (body.rate_limit_reset_credits?.available_count > 0) {
@@ -472,9 +477,10 @@ export async function usage(): Promise<Record<string, UsageRow>> {
       try {
         if (Date.now() - statSync(cache).mtimeMs < USAGE_CACHE_MS) {
           const row = parseUsage(JSON.parse(readFileSync(cache, "utf8")));
-          if (row) out[name] = { ...row, observedAt: statSync(cache).mtimeMs / 1000, stale: true };
+          if (row) out[name] = { ...row, observedAt: statSync(cache).mtimeMs / 1000, stale: true, error };
         }
       } catch {}
+      if (!out[name]) out[name] = { stale: true, error };
     }),
   );
   return out;

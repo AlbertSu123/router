@@ -145,7 +145,9 @@ The launchd service listens only on `127.0.0.1:18789` and requires a private
 local token. Codex retrieves that token through `router proxy token`; OAuth
 credentials stay in Router's existing credential store. The proxy forwards
 Responses and compaction requests directly to OpenAI, replacing credentials
-per request. It uses HTTP streaming, not WebSockets. Diagnostics include only
+per request. It uses macOS’s native curl HTTP/2 transport, not WebSockets. Credentials pass
+to curl through a private pipe, never command arguments or temporary files. Large conversation uploads
+are losslessly compressed with zstd; already encoded requests keep their encoding. Diagnostics include only
 profile names, session IDs, timestamps, and HTTP status, never request bodies
 or tokens. Do not run `router proxy token` interactively or paste its output.
 
@@ -213,7 +215,9 @@ rm -rf ~/Applications/Router.app ~/Library/LaunchAgents/dev.bryan.router.plist ~
 
 Each Codex account shows its available banked resets, how many can be used now,
 and each reset's expiration date, local time zone, and live countdown. Reset
-credits are read from OpenAI alongside usage and refreshed about once a minute.
+credits are read from OpenAI alongside usage. Usage polls run every 30 seconds
+after the previous check finishes, independently of account repair. Opening the
+menu also refreshes usage; each row shows when its reading was received.
 Resets expiring within seven days are highlighted in the account list, even for
 inactive accounts.
 

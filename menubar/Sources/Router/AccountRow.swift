@@ -41,13 +41,13 @@ struct AccountRow: View {
                                 if !resets.detailsComplete {
                                     Text("Some expiration dates are unavailable").foregroundStyle(.secondary)
                                 }
-                                if usage?.stale == true {
-                                    Text("Cached data — could not refresh").foregroundStyle(.orange)
-                                }
                             }
                             .font(.caption)
                             .fixedSize(horizontal: false, vertical: true)
                         }
+                    }
+                    if let usage, usage.signedOut == false, let error = usage.error {
+                        Text(error).font(.caption).foregroundStyle(.orange)
                     }
                 }
                 Spacer(minLength: 0)

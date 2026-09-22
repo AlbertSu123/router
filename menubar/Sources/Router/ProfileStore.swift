@@ -50,7 +50,7 @@ struct UsageLimit: Equatable {
 
 struct Usage: Equatable {
     let resets: BankedResets?
-    let stale: Bool
+    var stale: Bool
     // The provider rejected the account's sign-in; the row has no readings.
     let signedOut: Bool
     let observedAt: Double?
@@ -61,7 +61,9 @@ struct Usage: Equatable {
     // of the two above, never alongside them.
     let credits: UsageLimit?
 
-    var isEmpty: Bool { !signedOut && five == nil && week == nil && scoped.isEmpty && credits == nil && resets == nil }
+    var error: String? = nil
+
+    var isEmpty: Bool { error == nil && !stale && !signedOut && five == nil && week == nil && scoped.isEmpty && credits == nil && resets == nil }
 
     // Every limit the endpoint reported, for the account row.
     var summary: String {
@@ -86,7 +88,6 @@ final class ProfileStore {
     private(set) var codexCurrent: String?
     var meterPreferredProvider: String?
     private(set) var meterName: String?
-    private(set) var meterPending = 0
     private(set) var meterError: String?
     private(set) var meterLastSync: Date?
     private(set) var meterSubscriptionCount = 0
@@ -236,10 +237,6 @@ final class ProfileStore {
     }
 
     func refreshMeter() async {
-        if let data = await Self.runCLI(["meter", "status"]),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            meterPending = json["pending"] as? Int ?? 0
-        }
         refreshMeterState()
     }
 
@@ -276,10 +273,23 @@ final class ProfileStore {
         _ = await Self.runCLI(["heal", "--quiet"])
     }
 
+    private var fetchingUsage = false
+
     func fetchUsage() async {
+        guard !fetchingUsage else { return }
+        fetchingUsage = true
+        defer { fetchingUsage = false }
         guard let data = await Self.runCLI(["usage", "--json"]),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]]
-        else { return }
+        else {
+            usage = usage.mapValues { previous in
+                var row = previous
+                row.stale = true
+                row.error = "Usage refresh failed; retrying automatically"
+                return row
+            }
+            return
+        }
         var next: [String: Usage] = [:]
         for (name, limits) in json {
             let scoped = limits["scoped"] as? [String: Any] ?? [:]
@@ -291,7 +301,8 @@ final class ProfileStore {
                 five: Self.limit("5h", limits["five"]),
                 week: Self.limit("7d", limits["week"]),
                 scoped: scoped.keys.sorted().compactMap { Self.limit($0, scoped[$0]) },
-                credits: Self.credits(limits["credits"]))
+                credits: Self.credits(limits["credits"]),
+                error: limits["error"] as? String)
             if !row.isEmpty { next[name] = row }
         }
         if next != usage { usage = next }
@@ -434,6 +445,12 @@ final class ProfileStore {
             process.standardOutput = out
             process.standardError = err
             do { try process.run() } catch { continuation.resume(returning: (false, nil, Data())); return }
+            // Bound a stuck CLI/keychain/network process so polling recovers.
+            if ["usage", "heal", "status"].contains(args.first ?? "") {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 45) {
+                    if process.isRunning { process.terminate() }
+                }
+            }
             DispatchQueue.global(qos: .userInitiated).async {
                 // stderr carries one line of failure reason, far under a pipe
                 // buffer, so it can wait until stdout closes.

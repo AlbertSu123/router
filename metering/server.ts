@@ -215,34 +215,47 @@ export function createService(options: { path: string; origin: string; verify?: 
   }
   return {db, async fetch(r: Request) {
     let res: Response;
-    try { res = await handle(r); } catch { res = json({error:'Request failed. Try again.'},400); }
+    try { res = await handle(r); } catch(e) { res = e instanceof ProviderVerificationError ? json({error:e.message},e.status) : json({error:'Request failed. Try again.'},400); }
     res.headers.set('cache-control','no-store'); res.headers.set('referrer-policy','no-referrer'); res.headers.set('x-content-type-options','nosniff');
     res.headers.set('content-security-policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     return res;
   }};
 }
-export async function verifyProvider(b: any): Promise<{id:string;label:string;windows:any[]}|null> {
+export class ProviderVerificationError extends Error {
+  constructor(message:string, readonly status:number) { super(message); }
+}
+function requireProviderResponse(r:Response) {
+  if(r.ok)return;
+  if(r.status===401)throw new ProviderVerificationError('Subscription sign-in expired; reconnect this account in Router',403);
+  if(r.status===403)throw new ProviderVerificationError('Provider denied subscription verification; check account access',403);
+  if(r.status===429)throw new ProviderVerificationError('Provider rate limited verification; retrying automatically',503);
+  throw new ProviderVerificationError('Provider verification temporarily unavailable; retrying automatically',503);
+}
+export async function verifyProvider(b: any, upstream:typeof fetch=fetch): Promise<{id:string;label:string;windows:any[]}|null> {
   try {
     const headers: Record<string,string> = {authorization:`Bearer ${b.accessToken}`};
     if (b.provider==='claude') {
       headers['anthropic-beta']='oauth-2025-04-20';
-      const r = await fetch('https://api.anthropic.com/api/oauth/profile',{headers,redirect:'error',signal:AbortSignal.timeout(10000)});
-      if (!r.ok) return null; const p: any = await r.json();
+      const r = await upstream('https://api.anthropic.com/api/oauth/profile',{headers,redirect:'error',signal:AbortSignal.timeout(10000)});
+      requireProviderResponse(r); const p: any = await r.json();
       if (!p.account?.uuid || !p.organization?.uuid) return null;
-      const usage = await fetch('https://api.anthropic.com/api/oauth/usage',{headers,redirect:'error',signal:AbortSignal.timeout(10000)});
+      const usage = await upstream('https://api.anthropic.com/api/oauth/usage',{headers,redirect:'error',signal:AbortSignal.timeout(10000)});
       const u: any = usage.ok ? await usage.json() : {};
       const windows = (Array.isArray(u.limits)?u.limits:[]).filter((w: any)=>['session','weekly_all'].includes(w.kind)).map((w: any)=>({key:w.kind,reset:typeof w.resets_at==='number'?w.resets_at:Date.parse(w.resets_at)/1000,pct:w.percent})).filter(validWindow);
       return {id:`${p.organization.uuid}:${p.account.uuid}`,label:p.account.email ?? 'Claude subscription',windows};
     }
     if (typeof b.accountId!=='string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(b.accountId)) return null;
     headers['chatgpt-account-id']=b.accountId; headers.originator='codex_cli_rs';
-    const r = await fetch('https://chatgpt.com/backend-api/codex/usage',{headers,redirect:'error',signal:AbortSignal.timeout(10000)});
-    if (!r.ok) return null; const u: any = await r.json();
+    const r = await upstream('https://chatgpt.com/backend-api/codex/usage',{headers,redirect:'error',signal:AbortSignal.timeout(10000)});
+    requireProviderResponse(r); const u: any = await r.json();
     // The provider must bind the returned usage to the requested account.
     if (u.account_id !== b.accountId) return null;
     const windows = ['primary_window','secondary_window'].map(key=>({key,reset:u.rate_limit?.[key]?.reset_at,pct:u.rate_limit?.[key]?.used_percent})).filter(validWindow);
     return {id:b.accountId,label:u.email ?? `Codex ${b.accountId.slice(-8)}`,windows};
-  } catch { return null; }
+  } catch(e) {
+    if(e instanceof ProviderVerificationError)throw e;
+    throw new ProviderVerificationError('Verification network request failed; retrying automatically',503);
+  }
 }
 function validWindow(w: any) { return Number.isFinite(w.reset) && w.reset>Date.now()/1000 && Number.isFinite(w.pct) && w.pct>=0 && w.pct<=100; }
 if (import.meta.main) {

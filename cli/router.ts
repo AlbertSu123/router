@@ -813,7 +813,7 @@ async function cmdUsage(args: string[]) {
         const body: any = await r.json();
         const row = parseLimits(body);
         if (row) {
-          out[name] = row;
+          out[name] = { ...row, observedAt: Date.now() / 1000, stale: false };
           writeFileSync(join(cacheDir, `usage-limits-${name}.json`), JSON.stringify(body));
         }
       } catch {}
@@ -826,7 +826,7 @@ async function cmdUsage(args: string[]) {
       try {
         const path = join(cacheDir, `usage-limits-${name}.json`);
         if (Date.now() - statSync(path).mtimeMs < 2 * 3600 * 1000) {
-          out[name] = parseLimits(JSON.parse(readFileSync(path, "utf8"))) ?? {};
+          out[name] = { ...parseLimits(JSON.parse(readFileSync(path, "utf8"))), observedAt: statSync(path).mtimeMs / 1000, stale: true };
         }
       } catch {}
     }
@@ -836,6 +836,8 @@ async function cmdUsage(args: string[]) {
         if (Date.now() / 1000 - cached.ts < 24 * 3600) {
           out[name] = {
             ...out[name],
+            stale: true,
+            observedAt: out[name]?.observedAt ?? cached.ts,
             five:
               typeof cached.five === "number"
                 ? { pct: cached.five, reset: cached.fiveReset ?? undefined }
