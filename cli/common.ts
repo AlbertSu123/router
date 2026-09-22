@@ -17,6 +17,17 @@ export class SignedOutError extends Error {
   }
 }
 
+// launchd restarts a service only once its process exits. Stop accepting
+// connections, let in-flight responses finish, then exit — never linger as
+// a live process with no listener. launchd SIGKILLs after 20s regardless.
+export function exitOnSigterm(server: { stop(closeActiveConnections?: boolean): Promise<void> }, cleanup?: () => void) {
+  process.once("SIGTERM", () => {
+    cleanup?.();
+    setTimeout(() => process.exit(0), 15000).unref();
+    server.stop(false).finally(() => process.exit(0));
+  });
+}
+
 export function ensureDir() {
   mkdirSync(DIR, { recursive: true, mode: 0o700 });
 }

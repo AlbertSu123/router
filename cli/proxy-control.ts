@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { DIR, HOME, ensureDir } from "./common.ts";
+import { DIR, HOME, ensureDir, exitOnSigterm } from "./common.ts";
 import { beginMeter } from "./meter-client.ts";
 import { createProxyHandler, type ProxyObservation } from "./codex-proxy.ts";
 import { proxyCredential, proxySelection, enableProxySelection, disableProxySelection } from "./codex.ts";
@@ -104,7 +104,7 @@ export async function proxyCommand(args: string[]) {
       error() { return Response.json({ error: { message: "Router proxy request failed" } }, { status: 500 }); },
     });
     atomic(STATUS, JSON.stringify(status()) + "\n");
-    process.on("SIGTERM", () => { void server.stop(false); });
+    exitOnSigterm(server);
     return;
   }
   if (command === "install") {

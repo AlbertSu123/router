@@ -2,7 +2,7 @@ import {readFileSync,existsSync,writeFileSync,mkdirSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {personalSignIn,cancelPersonalSignIn} from './meter-login.ts';
-import {DIR,HOME} from './common.ts';
+import {DIR,HOME,exitOnSigterm} from './common.ts';
 import {meterAPI,meterSession,meterStatus,saveSession,syncMeter,beginMeter,readJSON,atomicJSON,type MeterCredential} from './meter-client.ts';
 const PENDING=join(DIR,'meter-login.json'), LABEL='dev.bryan.router.metering';
 const CLAUDE_SETTINGS=join(HOME,'.claude/settings.json');
@@ -99,7 +99,7 @@ export async function meterCommand(args:string[],credentials:()=>Promise<MeterCr
     const sync=async()=>{if(syncing||!meterSession())return;syncing=true;try{await syncMeter(await current())}catch{atomicJSON(join(DIR,'meter-sync-status.json'),{error:'Usage sync failed; data remains queued locally'})}finally{syncing=false}};
     const server=Bun.serve({hostname:'127.0.0.1',port:18790,idleTimeout:0,maxRequestBodySize:64*1024*1024,fetch:createClaudeHandler({credentials:current}),error:()=>Response.json({error:'Router request failed'},{status:500})});
     void sync();const timer=setInterval(sync,60000);
-    process.on('SIGTERM',()=>{clearInterval(timer);void server.stop(false)});return;
+    exitOnSigterm(server,()=>clearInterval(timer));return;
   }
   throw new Error('usage: router meter <login|finish|status|dashboard|sync|logout|install|enable|disable>');
 }
