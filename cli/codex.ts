@@ -738,7 +738,8 @@ export function use(name: string) {
 export function remove(name: string) {
   const profiles = loadProfiles();
   if (!profiles[name]) fail(`no codex profile "${name}"`);
-  if (sync() === name) {
+  // Routed sessions would lose their account mid-conversation.
+  if (sync() === name || proxySelection() === name) {
     fail(`"${name}" is the account Codex is signed in to — switch to another one first`);
   }
   keychainDelete(SERVICE, name);

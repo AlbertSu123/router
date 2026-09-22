@@ -259,6 +259,19 @@ final class ProfileStore {
         refresh()
     }
 
+    // nil on success; otherwise the CLI's own reason, e.g. the account Codex
+    // is signed in to cannot be removed until another one is selected.
+    func remove(_ profile: Profile) async -> String? {
+        let result = await Self.run(["remove", profile.id])
+        refresh()
+        await fetchUsage()
+        if result.ok { return nil }
+        let reason = String(decoding: result.stderr, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "router: ", with: "")
+        return reason.isEmpty ? "Router could not remove this account." : reason
+    }
+
     func heal() async {
         _ = await Self.runCLI(["heal", "--quiet"])
     }
@@ -408,18 +421,26 @@ final class ProfileStore {
     }
 
     nonisolated private static func runCLI(_ args: [String]) async -> Data? {
+        await run(args).stdout
+    }
+
+    nonisolated private static func run(_ args: [String]) async -> (ok: Bool, stdout: Data?, stderr: Data) {
         await withCheckedContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: NSHomeDirectory() + "/.router/bin/router")
             process.arguments = args
             let out = Pipe()
+            let err = Pipe()
             process.standardOutput = out
-            process.standardError = FileHandle.nullDevice
-            do { try process.run() } catch { continuation.resume(returning: nil); return }
+            process.standardError = err
+            do { try process.run() } catch { continuation.resume(returning: (false, nil, Data())); return }
             DispatchQueue.global(qos: .userInitiated).async {
+                // stderr carries one line of failure reason, far under a pipe
+                // buffer, so it can wait until stdout closes.
                 let data = out.fileHandleForReading.readDataToEndOfFile()
+                let errors = err.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
-                continuation.resume(returning: data)
+                continuation.resume(returning: (process.terminationStatus == 0, data, errors))
             }
         }
     }

@@ -3,6 +3,9 @@ import SwiftUI
 struct PanelView: View {
     let store: ProfileStore
     @Environment(\.openWindow) private var openWindow
+    @State private var removing: Profile?
+    @State private var removeBusy = false
+    @State private var removeError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -109,10 +112,25 @@ struct PanelView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8)
             ForEach(profiles) { profile in
-                AccountRow(profile: profile, isCurrent: store.isCurrent(profile), usage: store.usage[profile.id]) {
-                    Task { await store.select(profile.id) }
+                if removing == profile {
+                    RemoveAccountConfirmation(profile: profile, busy: removeBusy, error: removeError,
+                                              cancel: { removing = nil }, confirm: { confirmRemove(profile) })
+                } else {
+                    AccountRow(profile: profile, isCurrent: store.isCurrent(profile), usage: store.usage[profile.id],
+                               onRemove: profile.id == "main" ? nil : { removeError = nil; removing = profile }) {
+                        Task { await store.select(profile.id) }
+                    }
                 }
             }
+        }
+    }
+
+    private func confirmRemove(_ profile: Profile) {
+        removeBusy = true
+        Task {
+            let error = await store.remove(profile)
+            removeBusy = false
+            if let error { removeError = error } else { removing = nil }
         }
     }
 
