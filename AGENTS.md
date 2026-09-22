@@ -18,7 +18,7 @@ The last check must print `logged-in`. If it does not, have the user run
 ## 2. Install the CLI
 
 ```bash
-git clone --branch feat/codex-accounts https://github.com/AlbertSu123/router.git
+git clone https://github.com/AlbertSu123/router.git
 cd router
 ./install.sh
 export PATH="$HOME/.router/bin:$PATH"   # current shell; new shells get it from ~/.zshrc

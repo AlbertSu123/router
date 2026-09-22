@@ -6,7 +6,7 @@ accounts, from the macOS menu bar or the terminal.
 Paste this into your agent (Claude Code) to get set up:
 
 ```text
-Clone branch feat/codex-accounts from https://github.com/AlbertSu123/router
+Clone https://github.com/AlbertSu123/router
 and follow its AGENTS.md to install the router CLI and menu bar app. Verify each step. Stop and ask me
 when a sign-in needs my browser.
 ```
@@ -31,7 +31,7 @@ Requirements: macOS 15+, a Swift 6.2+ toolchain (Xcode command line tools),
 subscription account.
 
 ```bash
-git clone --branch feat/codex-accounts https://github.com/AlbertSu123/router.git
+git clone https://github.com/AlbertSu123/router.git
 cd router
 ./install.sh                      # CLI + PATH entry in ~/.zshrc
 menubar/Scripts/install_app.sh    # menu bar app, starts at login
@@ -39,7 +39,7 @@ menubar/Scripts/install_app.sh    # menu bar app, starts at login
 
 ## Distributing this fork
 
-Share this branch's repository link and the manual install commands above for
+Share the repository link and the manual install commands above for
 source installs. ChatGPT personal sign-in additionally requires the Codex CLI;
 Google personal sign-in does not. Users add their own subscription credentials
 and sign in personally to enable shared metering.
