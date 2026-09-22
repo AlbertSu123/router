@@ -16,6 +16,7 @@ struct Profile: Identifiable, Equatable {
     let tool: Tool
     let name: String
     let email: String?
+    var plan: String = "Plan unavailable"
 
     var id: String { tool.prefix + name }
 }
@@ -81,6 +82,15 @@ final class ProfileStore {
     private(set) var current = "main"
     // The Codex account auth.json holds, or nil when Codex is logged out.
     private(set) var codexCurrent: String?
+    var meterPreferredProvider: String?
+    private(set) var meterName: String?
+    private(set) var meterPending = 0
+    private(set) var meterError: String?
+    private(set) var meterLastSync: Date?
+    private(set) var meterSubscriptionCount = 0
+    private(set) var meterCode: String?
+    private(set) var meterSigningIn = false
+
     // Limits per profile id, refreshed from `router usage --json`.
     private(set) var usage: [String: Usage] = [:]
     // Observed so the menu picks up an account added while it is open.
@@ -133,6 +143,7 @@ final class ProfileStore {
     }
 
     func refresh() {
+        refreshMeterState()
         let name = readCurrent()
         if name != current { current = name }
         let rows = readProfiles()
@@ -143,6 +154,98 @@ final class ProfileStore {
         if codexName != codexCurrent { codexCurrent = codexName }
         let bar = Self.statusBarAppearance()
         if bar.name != barAppearance.name { barAppearance = bar }
+    }
+
+    private func refreshMeterState() {
+        let session = readDictionary(dir + "/meter-session.json")
+        let name = (session?["user"] as? [String: Any])?["name"] as? String
+        if name != meterName { meterName = name }
+        let status = readDictionary(dir + "/meter-sync-status.json")
+        let error = (readDictionary(dir + "/meter-setup.json")?["warning"] as? String) ?? (status?["error"] as? String)
+        if error != meterError { meterError = error }
+        let count = status?["subscriptions"] as? Int ?? 0
+        if count != meterSubscriptionCount { meterSubscriptionCount = count }
+        let date = (status?["lastSync"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+        if date != meterLastSync { meterLastSync = date }
+    }
+
+    private func readDictionary(_ path: String) -> [String: Any]? {
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    func signInMeter(provider: String, session: String) async -> (ok: Bool, message: String) {
+        guard let data = await Self.runCLI(["meter", "social-login", provider, "--session=\(session)"]),
+              let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (false, "Sign-in did not finish. Please try again.")
+        }
+        if let error = result["error"] as? String { return (false, error) }
+        guard result["ok"] as? Bool == true else { return (false, "Sign-in did not finish.") }
+        refresh()
+        return (true, (result["warning"] as? String) ?? "Signed in. Router is verifying your subscriptions.")
+    }
+
+    func personalSignInURL(session: String) -> URL? {
+        guard let status = readDictionary(dir + "/meter-personal-status.json"),
+              status["session"] as? String == session,
+              let raw = status["url"] as? String, let url = URL(string: raw),
+              url.scheme == "https", ["auth.openai.com", "accounts.google.com"].contains(url.host ?? "") else { return nil }
+        return url
+    }
+
+    func cancelMeterSignIn(session: String) async {
+        _ = await Self.runCLI(["meter", "cancel-login", "--session=\(session)"])
+    }
+
+    func openSharedUsage() async {
+        guard let data = await Self.runCLI(["meter", "dashboard"]),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            meterError = "Could not reach shared usage. Try again."
+            return
+        }
+        if let error = json["error"] as? String { meterError = error; return }
+        if let raw = json["url"] as? String, let url = URL(string: raw) {
+            NSWorkspace.shared.open(url)
+        }
+        if let code = json["code"] as? String {
+            meterCode = code
+            guard !meterSigningIn else { return }
+            meterSigningIn = true
+            defer { meterSigningIn = false }
+            for _ in 0..<300 {
+                try? await Task.sleep(for: .seconds(2))
+                guard let result = await Self.runCLI(["meter", "finish"]),
+                      let status = try? JSONSerialization.jsonObject(with: result) as? [String: Any] else { continue }
+                if status["ok"] as? Bool == true {
+                    meterCode = nil
+                    refresh()
+                    meterError = status["warning"] as? String
+                    return
+                }
+                if let error = status["error"] as? String {
+                    meterError = error
+                    meterCode = nil
+                    return
+                }
+            }
+            meterCode = nil
+            meterError = "Sign-in expired. Try again."
+        }
+    }
+
+    func refreshMeter() async {
+        if let data = await Self.runCLI(["meter", "status"]),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            meterPending = json["pending"] as? Int ?? 0
+        }
+        refreshMeterState()
+    }
+
+    func signOutMeter() async {
+        if let data = await Self.runCLI(["meter", "logout"]),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = json["error"] as? String { meterError = error; return }
+        refresh()
     }
 
     func isCurrent(_ profile: Profile) -> Bool {
@@ -280,7 +383,7 @@ final class ProfileStore {
 
     // Fresh from disk on every poll tick; the files are tiny.
     private func readProfiles() -> [Profile] {
-        [Profile(tool: .claude, name: "main", email: mainEmail())]
+        [Profile(tool: .claude, name: "main", email: mainEmail(), plan: AccountPlan.claude(mainAccount()))]
             + storedProfiles(profilesFile, .claude)
     }
 
@@ -295,7 +398,9 @@ final class ProfileStore {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let stored = json["profiles"] as? [String: [String: Any]] else { return [] }
         return stored.keys.sorted().map {
-            Profile(tool: tool, name: $0, email: stored[$0]?["email"] as? String)
+            Profile(tool: tool, name: $0, email: stored[$0]?["email"] as? String,
+                    plan: tool == .codex ? AccountPlan.codex(stored[$0]?["plan"] as? String)
+                        : AccountPlan.claude(stored[$0]?["account"] as? [String: Any]))
         }
     }
 
@@ -306,12 +411,13 @@ final class ProfileStore {
             process.arguments = args
             let out = Pipe()
             process.standardOutput = out
-            process.standardError = Pipe()
-            process.terminationHandler = { _ in
-                // Errors also arrive as JSON on stdout; hand back whatever came.
-                continuation.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { continuation.resume(returning: nil); return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                continuation.resume(returning: data)
             }
-            do { try process.run() } catch { continuation.resume(returning: nil) }
         }
     }
 
@@ -330,14 +436,16 @@ final class ProfileStore {
     // While a profile is active, ~/.claude.json carries that profile's email
     // (router patches it so Claude Code's own UI shows the right account).
     // The real login's identity lives in the stash for that window.
-    private func mainEmail() -> String? {
+    private func mainEmail() -> String? { mainAccount()?["emailAddress"] as? String }
+
+    private func mainAccount() -> [String: Any]? {
         for path in [dir + "/stash-account.json", claudeConfig] {
             guard let data = FileManager.default.contents(atPath: path),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 continue
             }
             let account = path == claudeConfig ? json["oauthAccount"] as? [String: Any] : json
-            if let email = account?["emailAddress"] as? String { return email }
+            if let account, account["emailAddress"] is String { return account }
         }
         return nil
     }

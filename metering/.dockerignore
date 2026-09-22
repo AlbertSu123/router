@@ -1,0 +1,5 @@
+data/
+secrets/
+tunnel/
+*.test.ts
+*.sqlite*

@@ -8,7 +8,7 @@ step has a verification command; do not continue past a failed check.
 ```bash
 sw_vers -productVersion        # must be 15.0 or newer
 command -v bun                 # must print a path (install: https://bun.sh)
-swift --version                # must print a Swift 6+ toolchain
+swift --version                # must print a Swift 6.2+ toolchain
 security find-generic-password -s "Claude Code-credentials" -a "$USER" -w >/dev/null && echo logged-in
 ```
 
@@ -18,7 +18,7 @@ The last check must print `logged-in`. If it does not, have the user run
 ## 2. Install the CLI
 
 ```bash
-git clone https://github.com/bryanhpchiang/router
+git clone --branch feat/codex-accounts https://github.com/AlbertSu123/router.git
 cd router
 ./install.sh
 export PATH="$HOME/.router/bin:$PATH"   # current shell; new shells get it from ~/.zshrc
@@ -73,8 +73,11 @@ router doctor    # every line must start with "ok"
   seconds; nothing restarts, and conversations survive.
 - `router use main` returns to the normal login.
 - Switching Codex accounts (`router use codex:<name>`) applies to Codex
-  sessions started afterwards. A running Codex session keeps the account it
-  started with.
+  sessions started afterwards when using direct authentication. With
+  `router proxy install` and `router proxy enable`, running routed sessions
+  switch on their next request. Existing direct sessions must be relaunched
+  once, resuming their original conversation IDs. Never claim a streaming
+  request moved accounts or silently fall back to another profile.
 - Statusline integration is optional; see README "Statusline".
 
 ## Files an agent may touch
@@ -83,8 +86,20 @@ router doctor    # every line must start with "ok"
 - `~/.codex/auth.json` — the live Codex credential a switch swaps
 - `~/.zshrc` — one PATH line, marked `# router:`
 - `~/Applications/Router.app`, `~/Library/LaunchAgents/dev.bryan.router.plist`
+- `~/.codex/config.toml` — backed-up, marked local proxy provider configuration
+- `~/Library/LaunchAgents/dev.bryan.router.codex-proxy.plist`
 - Keychain services `router`, `router-stash`, `router-codex`, and the
   swapped `Claude Code-credentials` item
 
 Never print token values. Read them only with `security` when a check
 requires presence, and discard the output.
+
+## Shared usage metering
+
+See `metering/README.md`. Personal Router identity is distinct from a provider
+account. Preserve server-side subscription verification and access checks; never
+attribute shared quota percentage changes directly to the current user. Never
+store prompts, response text, or provider tokens in the metering database/logs.
+The service on `ssh gud` stores SQLite under `~/router-metering/data`; its public
+HTTPS origin is `https://router-usage.gudvc.com`. Test per-user isolation, replay
+idempotency, and quota-reset boundaries whenever accounting changes.

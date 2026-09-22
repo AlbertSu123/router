@@ -27,6 +27,9 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 import * as codex from "./codex.ts";
+import { proxyCommand } from "./proxy-control.ts";
+import { meterCommand } from "./meter-control.ts";
+import type { MeterCredential } from "./meter-client.ts";
 import {
   DIR,
   HOME,
@@ -443,6 +446,25 @@ function labelFor(email: string | undefined, fallback: string): string {
   return email ?? fallback;
 }
 
+// Provider credentials only cross to the usage server for transient verification.
+async function meteringCredentials(): Promise<MeterCredential[]> {
+  const result: MeterCredential[] = [];
+  const item = readClaudeItem();
+  const main = (isMainFamily(item) ? item : readStash())?.claudeAiOauth?.accessToken;
+  if (main) result.push({ provider: "claude", profile: MAIN, accessToken: main });
+  for (const name of Object.keys(loadProfiles())) {
+    const token = readToken(name);
+    if (token) result.push({ provider: "claude", profile: name, accessToken: token.accessToken });
+  }
+  for (const profile of codex.list().profiles) {
+    try {
+      const value = await codex.proxyCredential(profile.name);
+      result.push({ provider: "codex", profile: value.name, accessToken: value.accessToken, accountId: value.accountId });
+    } catch { /* A signed-out subscription cannot renew its visibility grant. */ }
+  }
+  return result;
+}
+
 // --- commands -----------------------------------------------------------------
 
 function die(msg: string): never {
@@ -488,7 +510,7 @@ function cmdUse(args: string[]) {
   if (name.startsWith(codex.PREFIX)) {
     const profile = name.slice(codex.PREFIX.length);
     codex.use(profile);
-    console.log(`Switched Codex to "${profile}". Codex sessions you start from now on use it.`);
+    console.log(`Switched Codex to "${profile}". ${codex.proxySelection() ? "Routed sessions use it on their next request." : "New Codex sessions use it."}`);
     return;
   }
   switchTo(name);
@@ -901,16 +923,25 @@ usage:
   router remove <name>    delete an account's credential
   router heal [--quiet]   re-assert the active account after a refresh race
   router doctor           check the installation
+  router meter login     sign in personally for shared usage tracking
+  router meter dashboard open shared subscription usage (returns a URL)
+  router meter status    show sign-in, sync health, and queued usage
+  router proxy install   start the local Codex routing service
+  router proxy enable    route Codex requests through Router
+  router proxy disable   restore the previous Codex provider
+  router proxy status    show recent routing results (no prompts or tokens)
 
 "main" is the normal Claude Code keychain login. A Claude switch swaps the
 keychain credential, so running sessions follow on their next request (about
-30s). A Codex switch swaps ~/.codex/auth.json; Codex pins a session to the
-account it started with, so it lands on the next session you start.`);
+30s). With the local proxy enabled, Codex switches between requests without
+restarting. Direct Codex sessions adopt a switch when relaunched.`);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
 try {
   switch (cmd) {
+    case "proxy": await proxyCommand(rest); break;
+    case "meter": await meterCommand(rest, meteringCredentials); break;
     case "add": await cmdAdd(rest); break;
     case "use": cmdUse(rest); break;
     case "heal": await cmdHeal(rest); break;
@@ -922,6 +953,10 @@ try {
     default: help(); process.exit(cmd ? 1 : 0);
   }
 } catch (e) {
+  if (process.argv[2] === "meter") {
+    console.log(JSON.stringify({ error: e instanceof Error ? e.message : "Router usage command failed" }));
+    process.exit(1);
+  }
   if (!(e instanceof codex.CodexError)) throw e;
   die(e.message);
 }

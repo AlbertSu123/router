@@ -88,6 +88,28 @@ jwt='x.'+base64.urlsafe_b64encode(json.dumps({'email':'fixture@example.test'}).e
     def test_local_browser_success(self):
         rc,events=self.run_login(device=False);self.assertEqual(rc,0)
         self.assertIn('authorize',events[0]['url']);self.assertEqual(events[-1]['name'],'fixture');self.assert_clean()
+    def test_proxy_selection_survives_legacy_client_auth_writes(self):
+        import base64
+        def auth(name,stamp):
+            jwt='x.'+base64.urlsafe_b64encode(json.dumps({'email':name+'@example.test'}).encode()).decode()+'.x'
+            return {'tokens':{'id_token':jwt,'access_token':'fake-'+name,'refresh_token':'fake-'+name,'account_id':name},'last_refresh':stamp}
+        a=auth('a','2026-01-01T00:00:00Z');b=auth('b','2026-02-01T00:00:00Z')
+        (self.state/'codex-profiles.json').write_text(json.dumps({'profiles':{'a':{'accountId':'a'},'b':{'accountId':'b'}}}))
+        (self.root/'fake-keychain.json').write_text(json.dumps({'router-codex:a':json.dumps(a),'router-codex:b':json.dumps(b)}))
+        (self.state/'codex-current').write_text('a\n')
+        (self.state/'codex-proxy-selection').write_text('a\n')
+        (self.live/'auth.json').write_text(json.dumps(a))
+        p=self.command('use','codex:b');p.communicate(timeout=5);self.assertEqual(p.returncode,0)
+        self.assertEqual((self.state/'codex-proxy-selection').read_text().strip(),'b')
+        (self.live/'auth.json').write_text(json.dumps(a))
+        p=self.command('list','--json');p.communicate(timeout=5);self.assertEqual(p.returncode,0)
+        self.assertEqual((self.state/'codex-current').read_text().strip(),'b')
+        # Selecting b again must use the freshest stored credential, not the
+        # stale file a legacy client wrote before Router's refresh.
+        stale=auth('b','2026-01-01T00:00:00Z');stale['tokens']['refresh_token']='stale'
+        (self.live/'auth.json').write_text(json.dumps(stale))
+        p=self.command('use','codex:b');p.communicate(timeout=5);self.assertEqual(p.returncode,0)
+        self.assertEqual(json.loads((self.live/'auth.json').read_text())['tokens']['refresh_token'],'fake-b')
     def test_failure_expiry_and_bad_credentials(self):
         for mode in ['failure','expire','malformed']:
             with self.subTest(mode=mode):

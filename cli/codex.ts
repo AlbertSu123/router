@@ -17,16 +17,19 @@
 // Codex itself wrote, refresh token included — every account is a peer, and
 // none needs stashing.
 //
-// What a switch does not do: reach a running Codex session. Codex pins the
+// Direct Codex authentication cannot reach a running session. Codex pins the
 // account a session started with and refuses to reload auth.json for a
 // different account_id ("Skipping auth reload due to account id mismatch"),
-// so a switch lands on the next session you start, not the one you are in.
+// so a file swap lands on the next session you start. The optional local
+// proxy selects credentials for every request instead, reaching running
+// sessions that were launched with the router model provider.
 
 import { parseResetCredits } from "./codex-resets.ts";
 import { deviceChallenge } from "./codex-login.ts";
 
 import {
   mkdirSync,
+  existsSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -57,6 +60,7 @@ const CODEX_HOME = process.env.CODEX_HOME ?? join(HOME, ".codex");
 const AUTH_FILE = join(CODEX_HOME, "auth.json");
 const PROFILES_FILE = join(DIR, "codex-profiles.json");
 const CURRENT_FILE = join(DIR, "codex-current");
+const PROXY_SELECTION = join(DIR, "codex-proxy-selection");
 const LOGIN_PID_FILE = join(DIR, "codex-login.pid");
 const LOGIN_SESSION_FILE = join(DIR, "codex-login-session");
 const LOGIN_STATUS_FILE = join(DIR, "codex-login-status.json");
@@ -124,6 +128,24 @@ function currentName(): string | null {
     return null;
   }
 }
+
+export function proxySelection(): string | null {
+  try { return readFileSync(PROXY_SELECTION, "utf8").trim() || null; } catch { return null; }
+}
+
+export function setProxySelection(name: string) {
+  const tmp = `${PROXY_SELECTION}.${process.pid}.tmp`;
+  writeFileSync(tmp, name + "\n", { mode: 0o600 });
+  renameSync(tmp, PROXY_SELECTION);
+}
+
+export function enableProxySelection() {
+  const name = sync();
+  if (!name) fail("sign in to a Codex account before enabling the proxy");
+  setProxySelection(name);
+}
+
+export function disableProxySelection() { rmSync(PROXY_SELECTION, { force: true }); }
 
 function setCurrent(name: string | null) {
   ensureDir();
@@ -240,9 +262,14 @@ function sync(): string | null {
   // The menu bar app calls this every few seconds; only a real change is
   // worth a write.
   if (JSON.stringify(profiles[name]) !== before) saveProfiles(profiles);
-  writeBlob(name, auth);
-  if (currentName() !== name) setCurrent(name);
-  return name;
+  // A legacy client can still hold the old refresh-token generation. Never
+  // overwrite a newer Router refresh with that older on-disk snapshot.
+  const stored = readBlob(name);
+  if (!stored || Date.parse(stored.last_refresh ?? "") <= Date.parse(auth.last_refresh ?? "") || !stored.last_refresh) writeBlob(name, auth);
+  const selected = proxySelection();
+  const current = selected && profiles[selected] ? selected : name;
+  if (currentName() !== current) setCurrent(current);
+  return current;
 }
 
 // --- oauth --------------------------------------------------------------------
@@ -251,6 +278,26 @@ function sync(): string | null {
 // one current itself, and the refresh token is single-use, so racing it
 // would strand the session that is actually running.
 async function refreshBlob(name: string, auth: Auth): Promise<Auth | null> {
+  // Menu usage polling and the proxy are separate processes. Serialize token
+  // rotation, then re-read in case another process already rotated this token.
+  const lock = join(DIR, `codex-refresh-${name}.lock`);
+  const until = Date.now() + 15000;
+  while (true) {
+    try { mkdirSync(lock, { mode: 0o700 }); break; }
+    catch {
+      try { if (Date.now() - statSync(lock).mtimeMs > 45000) { rmSync(lock, { recursive: true, force: true }); continue; } } catch {}
+      if (Date.now() > until) return null;
+      await Bun.sleep(100);
+    }
+  }
+  try {
+    const latest = readBlob(name);
+    if (latest?.tokens && latest.tokens.refresh_token !== auth.tokens?.refresh_token) return latest;
+    return await refreshBlobLocked(name, latest ?? auth);
+  } finally { rmSync(lock, { recursive: true, force: true }); }
+}
+
+async function refreshBlobLocked(name: string, auth: Auth): Promise<Auth | null> {
   const refreshToken = auth.tokens?.refresh_token;
   if (!refreshToken) return null;
   try {
@@ -280,10 +327,24 @@ async function refreshBlob(name: string, auth: Auth): Promise<Auth | null> {
       last_refresh: new Date().toISOString(),
     };
     writeBlob(name, next);
+    if (readAuth()?.tokens?.account_id === next.tokens?.account_id) writeAuth(next);
     return next;
   } catch {
     return null;
   }
+}
+
+export async function proxyCredential(name = proxySelection() ?? currentName() ?? "", force = false) {
+  const profile = loadProfiles()[name];
+  if (!profile) fail("no selected Codex profile");
+  let auth = readBlob(name);
+  if (!auth?.tokens || auth.tokens.account_id !== profile.accountId) fail("selected profile has invalid credentials");
+  const expires = expiresAt(auth);
+  if (force || (typeof expires === "number" && expires < Date.now() + 60000)) {
+    auth = await refreshBlob(name, auth);
+    if (!auth?.tokens) fail("selected profile could not refresh; sign in again");
+  }
+  return { name, accessToken: auth.tokens.access_token, accountId: auth.tokens.account_id };
 }
 
 // --- usage --------------------------------------------------------------------
@@ -632,12 +693,13 @@ function descendants(root: number): number[] {
 export function use(name: string) {
   const profiles = loadProfiles();
   if (!profiles[name]) fail(`no codex profile "${name}" — see: router list`);
-  const auth = readBlob(name);
-  if (!auth?.tokens) fail(`codex profile "${name}" has no stored credential — re-add it`);
   guardLive();
   sync();
+  const auth = readBlob(name);
+  if (!auth?.tokens) fail(`codex profile "${name}" has no stored credential — re-add it`);
   writeAuth(auth);
   setCurrent(name);
+  if (existsSync(PROXY_SELECTION)) setProxySelection(name);
 }
 
 export function remove(name: string) {

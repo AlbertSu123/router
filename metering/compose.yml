@@ -1,0 +1,19 @@
+services:
+  metering:
+    build: .
+    restart: unless-stopped
+    ports: ["127.0.0.1:8791:8791"]
+    environment:
+      ROUTER_ORIGIN: https://router-usage.gudvc.com
+    volumes: ["./data:/data", "./secrets/google-oauth.json:/run/secrets/google-oauth.json:ro"]
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes: ["./tunnel:/etc/cloudflared:ro"]
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}

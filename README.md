@@ -6,13 +6,13 @@ accounts, from the macOS menu bar or the terminal.
 Paste this into your agent (Claude Code) to get set up:
 
 ```text
-Clone https://github.com/bryanhpchiang/router and follow its AGENTS.md to
-install the router CLI and menu bar app. Verify each step. Stop and ask me
+Clone branch feat/codex-accounts from https://github.com/AlbertSu123/router
+and follow its AGENTS.md to install the router CLI and menu bar app. Verify each step. Stop and ask me
 when a sign-in needs my browser.
 ```
 
 - One click switches every Claude Code session, running ones included.
-  Codex follows on the next session you start.
+  Codex follows on the next request when the local proxy is enabled.
 - Accounts are identified by email. Credentials live in the macOS Keychain.
 - Adding an account is one browser sign-in. Switching never asks you to
   log in again.
@@ -26,16 +26,35 @@ when a sign-in needs my browser.
 
 ## Manual install
 
-Requirements: macOS 15+, the Xcode command line tools (`swift`),
+Requirements: macOS 15+, a Swift 6.2+ toolchain (Xcode command line tools),
 [Bun](https://bun.sh), and Claude Code logged in with a Claude
 subscription account.
 
 ```bash
-git clone https://github.com/bryanhpchiang/router
+git clone --branch feat/codex-accounts https://github.com/AlbertSu123/router.git
 cd router
 ./install.sh                      # CLI + PATH entry in ~/.zshrc
 menubar/Scripts/install_app.sh    # menu bar app, starts at login
 ```
+
+## Distributing this fork
+
+Share this branch's repository link and the manual install commands above for
+source installs. ChatGPT personal sign-in additionally requires the Codex CLI;
+Google personal sign-in does not. Users add their own subscription credentials
+and sign in personally to enable shared metering.
+
+There is no standalone binary release yet. Copying only `Router.app` to another
+Mac is insufficient: it currently invokes `~/.router/bin/router`, whose runtime
+requires Bun and the installed CLI sources.
+
+For a download-and-install release, package the app together with its CLI and
+Bun runtime, provide first-run installation, and test it on a clean Mac without
+build tools. Sign all executable components with the publisher's Developer ID
+Application certificate, notarize and staple the release, then upload the DMG
+or ZIP to this fork's GitHub Releases. Publish architecture requirements (or
+build a universal release) and the macOS 15 minimum. Verify both personal
+sign-in providers with an external user before opening public distribution.
 
 ## Use
 
@@ -105,7 +124,40 @@ rather than the Keychain:
   is a peer and none needs stashing.
 - Codex pins a session to the account it started with and refuses to reload
   `auth.json` for a different account, so a switch lands on the next session
-  you start.
+  you start unless the local proxy below is enabled.
+
+### Switch running Codex sessions with the local proxy
+
+```bash
+./install.sh
+router proxy install
+router proxy enable
+router proxy status
+```
+
+Relaunch existing Codex sessions once, resuming their original conversation
+IDs. Future `router use codex:<name>` and menu-bar switches apply on each
+session's next request. Requests already streaming stay on their starting
+account. There is no automatic fallback: if the selected account is out of
+quota, select another account and retry in the same conversation.
+
+The launchd service listens only on `127.0.0.1:18789` and requires a private
+local token. Codex retrieves that token through `router proxy token`; OAuth
+credentials stay in Router's existing credential store. The proxy forwards
+Responses and compaction requests directly to OpenAI, replacing credentials
+per request. It uses HTTP streaming, not WebSockets. Diagnostics include only
+profile names, session IDs, timestamps, and HTTP status, never request bodies
+or tokens. Do not run `router proxy token` interactively or paste its output.
+
+Enabling backs up `~/.codex/config.toml` under `~/.router/` and adds the
+`router` model provider. `router proxy disable` removes only Router's managed
+configuration and restores the previous default provider while preserving
+other edits. The service stays available for existing routed sessions.
+
+Desktop Codex clients that read the same config may also use this provider
+after relaunch; desktop UI identity and ChatGPT chat traffic are not switched
+by this proxy. Provider-filtered history lists may hide conversations created
+with the old provider; explicit `codex resume <session-id>` preserves them.
 
 State lives in `~/.router/` (no credentials on disk; they stay in the
 Keychain, except the one live `~/.codex/auth.json` that Codex reads).
@@ -150,8 +202,8 @@ rm -rf ~/Applications/Router.app ~/Library/LaunchAgents/dev.bryan.router.plist ~
 - If a switched account stops authenticating, run `router use main` and
   re-add it (tokens can expire; `router heal` renews them when the sign-in
   returned a refresh token).
-- A Codex switch does not reach a Codex session that is already running;
-  start a new one. Claude Code sessions do follow.
+- Direct Codex sessions keep their starting account. Enable the local proxy
+  and restart/resume once to switch on subsequent requests.
 - `router add --codex` needs the `codex` CLI on `PATH` (or `ROUTER_CODEX_BIN`
   pointing at it) and a free port 1455 for browser sign-in. Device sign-in does not need that port.
 - macOS only. Built for personal use; the credential layouts it relies on
@@ -181,3 +233,17 @@ Router starts at login and launchd relaunches it after a crash or abnormal exit.
 Choosing Quit intentionally stops it until you reopen it or log in again.
 macOS still controls menu-bar layout: Command-drag Router nearer the clock if
 other menu-bar items crowd it out. No app can reserve unlimited menu-bar space.
+
+## Shared usage and personal sign-in
+
+Click **Sign in to Router**, then **Sign in with ChatGPT** or **Continue with
+Google**, to connect your personal identity without a Router password. After
+sign-in, **Shared usage** opens a dashboard showing each person's raw tokens and
+pressure-weighted usage, restricted to subscriptions you have signed into.
+Spare capacity carries less weight than usage in quota windows that fill up.
+
+The server runs at [router-usage.gudvc.com](https://router-usage.gudvc.com) on the
+`gud` VPS. Provider credentials are verified transiently; only usage metadata is
+stored. Existing direct sessions need a one-time restart/resume to use Router's
+metered transports. See [metering setup and accounting](metering/README.md) for
+coverage, access expiry, scoring, deployment, and rollback commands.
