@@ -71,9 +71,6 @@ struct PanelView: View {
                 } else if store.meterName != nil {
                     Text(store.meterLastSync.map { "Synced \($0.formatted(date: .omitted, time: .shortened)) · \(store.meterSubscriptionCount) subscriptions" } ?? "Verifying subscriptions…")
                         .font(.caption2).foregroundStyle(.secondary)
-                    if store.meterPending > 0 {
-                        Text("\(store.meterPending) requests queued to sync").font(.caption2).foregroundStyle(.secondary)
-                    }
                 }
                 HStack(spacing: 14) {
                     Menu {
