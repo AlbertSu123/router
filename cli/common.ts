@@ -9,6 +9,14 @@ import { join } from "node:path";
 export const HOME = homedir();
 export const DIR = join(HOME, ".router");
 
+// The provider rejected a profile's refresh token, so only a new sign-in
+// can bring it back. Callers must not fall back to another account.
+export class SignedOutError extends Error {
+  constructor(readonly profile: string) {
+    super(`"${profile}" is signed out — add the account again to reconnect it`);
+  }
+}
+
 export function ensureDir() {
   mkdirSync(DIR, { recursive: true, mode: 0o700 });
 }
@@ -85,6 +93,9 @@ export type UsageRow = {
   resets?: import("./codex-resets.ts").ResetCredits;
   observedAt?: number;
   stale?: boolean;
+  // The provider rejected the account's refresh token: it needs a new
+  // sign-in, and the row carries no readings.
+  signedOut?: boolean;
   five?: Limit;
   week?: Limit;
   scoped?: Record<string, Limit>;

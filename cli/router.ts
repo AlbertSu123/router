@@ -38,6 +38,7 @@ import {
   keychainDelete,
   keychainRead,
   keychainWrite,
+  SignedOutError,
   uniqueName,
   type Credits,
   type Limit,
@@ -85,6 +86,9 @@ type Profile = {
   account?: Record<string, unknown>;
   accountCheckAt?: number;
   scopeCheckAt?: number;
+  // Set when the token endpoint rejected the refresh token outright; only a
+  // new sign-in, which rewrites the whole entry, clears it.
+  signedOutAt?: number;
 };
 type Profiles = Record<string, Profile>;
 
@@ -99,6 +103,13 @@ function loadProfiles(): Profiles {
 function saveProfiles(profiles: Profiles) {
   ensureDir();
   writeFileSync(PROFILES_FILE, JSON.stringify({ profiles }, null, 2) + "\n", { mode: 0o600 });
+}
+
+function markSignedOut(name: string) {
+  const profiles = loadProfiles();
+  if (!profiles[name] || profiles[name].signedOutAt) return;
+  profiles[name].signedOutAt = Date.now();
+  saveProfiles(profiles);
 }
 
 function currentName(): string {
@@ -374,7 +385,9 @@ async function authRedeem(paste: string): Promise<Redeemed> {
   return { token, refreshToken, email, expiresAt, scopes: parseScope(body.scope) ?? SCOPES };
 }
 
-async function postRefresh(refreshToken: string, scopes: string[]): Promise<any | null> {
+// `rejected` is the endpoint's verdict that the refresh token is dead
+// (invalid_grant); a network or server failure is not.
+async function postRefresh(refreshToken: string, scopes: string[]): Promise<{ body: any | null; rejected: boolean }> {
   const r = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -386,7 +399,8 @@ async function postRefresh(refreshToken: string, scopes: string[]): Promise<any 
     }),
   });
   const body: any = await r.json().catch(() => ({}));
-  return r.ok && typeof body.access_token === "string" ? body : null;
+  if (r.ok && typeof body.access_token === "string") return { body, rejected: false };
+  return { body: null, rejected: body?.error === "invalid_grant" };
 }
 
 // A refresh always asks for the full scope set — the token endpoint grants
@@ -396,13 +410,16 @@ async function postRefresh(refreshToken: string, scopes: string[]): Promise<any 
 async function refreshStoredToken(name: string, stored: StoredToken): Promise<StoredToken | null> {
   if (!stored.refreshToken) return null;
   const want = [...new Set([...SCOPES, ...(stored.scopes ?? [])])];
-  let body = await postRefresh(stored.refreshToken, want);
+  let { body, rejected } = await postRefresh(stored.refreshToken, want);
   let granted = want;
   if (!body && stored.scopes) {
-    body = await postRefresh(stored.refreshToken, stored.scopes);
+    ({ body, rejected } = await postRefresh(stored.refreshToken, stored.scopes));
     granted = stored.scopes;
   }
-  if (!body) return null;
+  if (!body) {
+    if (rejected) markSignedOut(name);
+    return null;
+  }
   const next: StoredToken = {
     accessToken: body.access_token,
     refreshToken: body.refresh_token ?? stored.refreshToken,
@@ -452,15 +469,17 @@ async function meteringCredentials(): Promise<MeterCredential[]> {
   const item = readClaudeItem();
   const main = (isMainFamily(item) ? item : readStash())?.claudeAiOauth?.accessToken;
   if (main) result.push({ provider: "claude", profile: MAIN, accessToken: main });
-  for (const name of Object.keys(loadProfiles())) {
-    const token = readToken(name);
+  // A signed-out subscription can neither serve requests nor be verified,
+  // and its row already says so.
+  for (const [name, profile] of Object.entries(loadProfiles())) {
+    const token = profile.signedOutAt ? null : readToken(name);
     if (token) result.push({ provider: "claude", profile: name, accessToken: token.accessToken });
   }
   for (const profile of codex.list().profiles) {
     try {
       const value = await codex.proxyCredential(profile.name);
       result.push({ provider: "codex", profile: value.name, accessToken: value.accessToken, accountId: value.accountId });
-    } catch { /* A signed-out subscription cannot renew its visibility grant. */ }
+    } catch { /* Signed out, or no usable credential to prove. */ }
   }
   return result;
 }
@@ -513,6 +532,7 @@ function cmdUse(args: string[]) {
     console.log(`Switched Codex to "${profile}". ${codex.proxySelection() ? "Routed sessions use it on their next request." : "New Codex sessions use it."}`);
     return;
   }
+  if (loadProfiles()[name]?.signedOutAt) throw new SignedOutError(name);
   switchTo(name);
   console.log(`Switched to "${name}". Sessions pick it up on their next request (about 30s).`);
 }
@@ -532,7 +552,8 @@ async function cmdHeal(args: string[]) {
   const REFRESH_MARGIN_MS = 45 * 60 * 1000;
   const SCOPE_RETRY_MS = 6 * 3600 * 1000;
   const ACCOUNT_RETRY_MS = 3600 * 1000;
-  for (const name of Object.keys(loadProfiles())) {
+  for (const [name, profile] of Object.entries(loadProfiles())) {
+    if (profile.signedOutAt) continue;
     const stored = readToken(name);
     if (!stored?.refreshToken) continue;
     const nearExpiry =
@@ -763,9 +784,11 @@ async function cmdUsage(args: string[]) {
   const tokens: Record<string, string> = {};
   const mainToken = (isMainFamily(item) ? item : readStash())?.claudeAiOauth?.accessToken;
   if (mainToken) tokens[MAIN] = mainToken;
-  for (const name of Object.keys(loadProfiles())) {
-    const stored = readToken(name);
-    if (stored) tokens[name] = stored.accessToken;
+  const signedOut = new Set<string>();
+  for (const [name, profile] of Object.entries(loadProfiles())) {
+    const stored = profile.signedOutAt ? null : readToken(name);
+    if (profile.signedOutAt) signedOut.add(name);
+    else if (stored) tokens[name] = stored.accessToken;
   }
   const cacheDir = join(HOME, ".claude/cache");
   mkdirSync(cacheDir, { recursive: true });
@@ -773,10 +796,19 @@ async function cmdUsage(args: string[]) {
   await Promise.all(
     Object.entries(tokens).map(async ([name, token]) => {
       try {
-        const r = await fetch(USAGE_URL, {
-          headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },
+        const get = (bearer: string) => fetch(USAGE_URL, {
+          headers: { Authorization: `Bearer ${bearer}`, "anthropic-beta": "oauth-2025-04-20" },
           signal: AbortSignal.timeout(6000),
         });
+        let r = await get(token);
+        // The endpoint's 429s say nothing about the token; a 401 does, so
+        // only that earns a refresh — main's pair belongs to Claude Code.
+        if (r.status === 401 && name !== MAIN) {
+          const stored = readToken(name);
+          const next = stored && (await refreshStoredToken(name, stored));
+          if (loadProfiles()[name]?.signedOutAt) { signedOut.add(name); return; }
+          if (next) r = await get(next.accessToken);
+        }
         if (!r.ok) return;
         const body: any = await r.json();
         const row = parseLimits(body);
@@ -787,7 +819,9 @@ async function cmdUsage(args: string[]) {
       } catch {}
     }),
   );
+  for (const name of signedOut) out[name] = { signedOut: true };
   for (const name of [MAIN, ...Object.keys(loadProfiles())]) {
+    if (signedOut.has(name)) continue;
     if (!out[name]) {
       try {
         const path = join(cacheDir, `usage-limits-${name}.json`);
@@ -841,6 +875,7 @@ async function cmdUsage(args: string[]) {
         if (!u.resets.detailsComplete) parts.push("some expiration dates unavailable");
         if (u.stale) parts.push("cached reset data");
       }
+      if (u.signedOut) parts.push("signed out — add the account again");
       console.log(`${name.padEnd(20)} ${parts.length ? parts.join("  ") : "no limits reported"}`);
     }
   }
@@ -891,9 +926,10 @@ async function cmdDoctor() {
     );
     report(!!readStash(), "main login stashed for switch-back");
   }
-  for (const name of Object.keys(profiles)) {
+  for (const [name, profile] of Object.entries(profiles)) {
     const stored = readToken(name);
     report(!!stored, `token stored for "${name}"`);
+    report(!profile.signedOutAt, `"${name}" is signed in (re-add it if not)`);
     if (stored) {
       report(
         SCOPES.every((s) => (stored.scopes ?? []).includes(s)),
@@ -957,6 +993,6 @@ try {
     console.log(JSON.stringify({ error: e instanceof Error ? e.message : "Router usage command failed" }));
     process.exit(1);
   }
-  if (!(e instanceof codex.CodexError)) throw e;
+  if (!(e instanceof codex.CodexError || e instanceof SignedOutError)) throw e;
   die(e.message);
 }

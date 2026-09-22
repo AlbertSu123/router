@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createProxyHandler, type ProxyCredential } from "./codex-proxy.ts";
 import { configureProxy, unconfigureProxy } from "./proxy-control.ts";
+import { SignedOutError } from "./common.ts";
 
 const accounts: Record<string, ProxyCredential> = {
   a: { name: "a", accessToken: "secret-a", accountId: "account-a" },
@@ -33,6 +34,26 @@ test("refresh stays on the request's account when selection changes", async () =
   }) as typeof fetch });
   expect((await handler(request())).status).toBe(200);
   expect(attempts).toBe(2);
+});
+test("a signed-out selection is a 401 that names it, and never reaches upstream", async () => {
+  let calls = 0;
+  const handler = createProxyHandler({ token: "local", credential: async () => { throw new SignedOutError("codex:a"); },
+    upstream: (async () => { calls++; return new Response(""); }) as typeof fetch });
+  const response = await handler(request());
+  expect(response.status).toBe(401);
+  expect((await response.json()).error.message).toContain('"codex:a" is signed out');
+  expect(calls).toBe(0);
+});
+test("a revoked token whose refresh is rejected is a 401, not an unreachable 502", async () => {
+  let attempts = 0;
+  const handler = createProxyHandler({ token: "local", credential: async (name, refresh) => {
+    if (refresh) throw new SignedOutError(`codex:${name}`);
+    return accounts.a!;
+  }, upstream: (async () => { attempts++; return new Response("revoked", { status: 401 }); }) as typeof fetch });
+  const response = await handler(request());
+  expect(response.status).toBe(401);
+  expect((await response.json()).error.message).toContain('"codex:a" is signed out');
+  expect(attempts).toBe(1);
 });
 test("streams immediately and leaves in-flight responses on their original account", async () => {
   let selected = "a", controller: ReadableStreamDefaultController<Uint8Array>;

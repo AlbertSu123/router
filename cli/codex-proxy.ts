@@ -1,9 +1,13 @@
 // Local Responses transport. Selection is captured once per request, never
 // changed mid-stream, and never silently falls back to another paid account.
 import { timingSafeEqual } from "node:crypto";
+import { SignedOutError } from "./common.ts";
 
 export type ProxyCredential = { name: string; accessToken: string; accountId: string };
 export type ProxyObservation = { profile: string; path: string; status: number; session: string | null; at: string };
+// 401, not 5xx: a revoked sign-in will not recover on retry.
+const signedOut = (e: SignedOutError) => Response.json({ error: { message: `Router account ${e.message}; no other account was used` } }, { status: 401 });
+
 export function createProxyHandler(options: {
   token: string;
   credential: (name?: string, refresh?: boolean) => Promise<ProxyCredential>;
@@ -28,7 +32,10 @@ export function createProxyHandler(options: {
     if (!allowed || request.headers.has("upgrade")) return new Response("Not found", { status: 404 });
     let credential: ProxyCredential;
     try { credential = await options.credential(); }
-    catch { return Response.json({ error: { message: "Selected Router account needs sign-in; run router doctor" } }, { status: 503 }); }
+    catch (e) {
+      if (e instanceof SignedOutError) return signedOut(e);
+      return Response.json({ error: { message: "Selected Router account needs sign-in; run router doctor" } }, { status: 503 });
+    }
     let metered = (response: Response) => response;
     if (request.method === "POST" && options.meter) {
       try { metered = await options.meter(credential); }
@@ -57,7 +64,12 @@ export function createProxyHandler(options: {
       // Refresh the SAME profile even if selection changed during this call.
       if (response.status === 401) {
         await response.body?.cancel();
-        credential = await options.credential(credential.name, true);
+        try { credential = await options.credential(credential.name, true); }
+        catch (e) {
+          options.observe?.({ profile: credential.name, path, status: 401, session: null, at: new Date().toISOString() });
+          return metered(e instanceof SignedOutError ? signedOut(e)
+            : Response.json({ error: { message: `Router could not renew the sign-in for "${credential.name}"; no other account was used` } }, { status: 401 }));
+        }
         response = await send();
       }
       const session = request.headers.get("session_id");

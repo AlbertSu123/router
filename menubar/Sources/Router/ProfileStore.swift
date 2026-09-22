@@ -51,6 +51,8 @@ struct UsageLimit: Equatable {
 struct Usage: Equatable {
     let resets: BankedResets?
     let stale: Bool
+    // The provider rejected the account's sign-in; the row has no readings.
+    let signedOut: Bool
     let observedAt: Double?
     let five: UsageLimit?
     let week: UsageLimit?
@@ -59,7 +61,7 @@ struct Usage: Equatable {
     // of the two above, never alongside them.
     let credits: UsageLimit?
 
-    var isEmpty: Bool { five == nil && week == nil && scoped.isEmpty && credits == nil && resets == nil }
+    var isEmpty: Bool { !signedOut && five == nil && week == nil && scoped.isEmpty && credits == nil && resets == nil }
 
     // Every limit the endpoint reported, for the account row.
     var summary: String {
@@ -271,6 +273,7 @@ final class ProfileStore {
             let row = Usage(
                 resets: BankedResets(limits["resets"]),
                 stale: limits["stale"] as? Bool ?? false,
+                signedOut: limits["signedOut"] as? Bool ?? false,
                 observedAt: limits["observedAt"] as? Double,
                 five: Self.limit("5h", limits["five"]),
                 week: Self.limit("7d", limits["week"]),

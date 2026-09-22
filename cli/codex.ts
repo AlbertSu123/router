@@ -48,6 +48,7 @@ import {
   keychainDelete,
   keychainRead,
   keychainWrite,
+  SignedOutError,
   uniqueName,
   windowLabel,
   type Limit,
@@ -97,6 +98,9 @@ type CodexProfile = {
   email?: string;
   plan?: string;
   addedAt: string;
+  // Set when OpenAI rejected the refresh token outright; only a new sign-in,
+  // which rewrites the whole entry, clears it.
+  signedOutAt?: number;
 };
 type CodexProfiles = Record<string, CodexProfile>;
 
@@ -146,6 +150,17 @@ export function enableProxySelection() {
 }
 
 export function disableProxySelection() { rmSync(PROXY_SELECTION, { force: true }); }
+
+export function isSignedOut(name: string): boolean {
+  return !!loadProfiles()[name]?.signedOutAt;
+}
+
+function markSignedOut(name: string) {
+  const profiles = loadProfiles();
+  if (!profiles[name] || profiles[name].signedOutAt) return;
+  profiles[name].signedOutAt = Date.now();
+  saveProfiles(profiles);
+}
 
 function setCurrent(name: string | null) {
   ensureDir();
@@ -312,6 +327,9 @@ async function refreshBlobLocked(name: string, auth: Auth): Promise<Auth | null>
       }),
       signal: AbortSignal.timeout(10000),
     });
+    // 400/401 is a verdict on the token itself (revoked, reused, expired);
+    // anything else may be transient and must not sign the account out.
+    if (r.status === 400 || r.status === 401) markSignedOut(name);
     if (!r.ok) return null;
     const body: any = await r.json();
     if (typeof body.access_token !== "string") return null;
@@ -337,11 +355,13 @@ async function refreshBlobLocked(name: string, auth: Auth): Promise<Auth | null>
 export async function proxyCredential(name = proxySelection() ?? currentName() ?? "", force = false) {
   const profile = loadProfiles()[name];
   if (!profile) fail("no selected Codex profile");
+  if (profile.signedOutAt) throw new SignedOutError(PREFIX + name);
   let auth = readBlob(name);
   if (!auth?.tokens || auth.tokens.account_id !== profile.accountId) fail("selected profile has invalid credentials");
   const expires = expiresAt(auth);
   if (force || (typeof expires === "number" && expires < Date.now() + 60000)) {
     auth = await refreshBlob(name, auth);
+    if (isSignedOut(name)) throw new SignedOutError(PREFIX + name);
     if (!auth?.tokens) fail("selected profile could not refresh; sign in again");
   }
   return { name, accessToken: auth.tokens.access_token, accountId: auth.tokens.account_id };
@@ -393,6 +413,10 @@ function parseUsage(body: any): UsageRow | null {
 }
 
 async function fetchUsage(auth: Auth, url = USAGE_URL): Promise<any | null> {
+  return (await fetchUsageStatus(auth, url)).body;
+}
+
+async function fetchUsageStatus(auth: Auth, url = USAGE_URL): Promise<{ status: number; body: any | null }> {
   try {
     const r = await fetch(url, {
       headers: {
@@ -402,9 +426,9 @@ async function fetchUsage(auth: Auth, url = USAGE_URL): Promise<any | null> {
       },
       signal: AbortSignal.timeout(8000),
     });
-    return r.ok ? await r.json() : null;
+    return { status: r.status, body: r.ok ? await r.json() : null };
   } catch {
-    return null;
+    return { status: 0, body: null };
   }
 }
 
@@ -418,13 +442,21 @@ export async function usage(): Promise<Record<string, UsageRow>> {
   const out: Record<string, UsageRow> = {};
   await Promise.all(
     Object.keys(profiles).map(async (name) => {
+      if (profiles[name]!.signedOutAt) { out[name] = { signedOut: true }; return; }
       let auth = readBlob(name);
       if (!auth?.tokens) return;
       const exp = expiresAt(auth);
       if (name !== active && typeof exp === "number" && exp - Date.now() <= REFRESH_MARGIN_MS) {
         auth = (await refreshBlob(name, auth)) ?? auth;
       }
-      const body = await fetchUsage(auth);
+      let { status, body } = await fetchUsageStatus(auth);
+      // A rejected access token is dead for whoever holds it, the active
+      // profile included, so refreshing it cannot strand a working session.
+      if (status === 401) {
+        const next = await refreshBlob(name, auth);
+        if (isSignedOut(name)) { out[name] = { signedOut: true }; return; }
+        if (next) { auth = next; ({ body } = await fetchUsageStatus(auth)); }
+      }
       const cache = join(CACHE_DIR, `codex-usage-${name}.json`);
       if (body) {
         if (body.rate_limit_reset_credits?.available_count > 0) {
@@ -695,6 +727,7 @@ export function use(name: string) {
   if (!profiles[name]) fail(`no codex profile "${name}" — see: router list`);
   guardLive();
   sync();
+  if (profiles[name].signedOutAt) throw new SignedOutError(PREFIX + name);
   const auth = readBlob(name);
   if (!auth?.tokens) fail(`codex profile "${name}" has no stored credential — re-add it`);
   writeAuth(auth);
@@ -763,8 +796,9 @@ export function doctor(report: (good: boolean, msg: string) => void) {
 
   const current = sync();
   report(!!current, "an account is active for Codex");
-  for (const name of Object.keys(loadProfiles())) {
+  for (const [name, profile] of Object.entries(loadProfiles())) {
     report(!!readBlob(name)?.tokens, `credential stored for "codex:${name}"`);
+    report(!profile.signedOutAt, `"codex:${name}" is signed in (re-add it if not)`);
   }
 }
 

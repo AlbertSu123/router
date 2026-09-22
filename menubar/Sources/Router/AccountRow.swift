@@ -19,9 +19,15 @@ struct AccountRow: View {
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
                         .help("Usage percentages are relative to this account’s own plan limits.")
-                    Text(usage?.summary.isEmpty == false ? usage!.summary : "no usage data yet")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if usage?.signedOut == true {
+                        Text("Signed out — add this account again to reconnect")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text(usage?.summary.isEmpty == false ? usage!.summary : "no usage data yet")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     if let resets = usage?.resets {
                         TimelineView(.periodic(from: .now, by: 60)) { context in
                             VStack(alignment: .leading, spacing: 3) {
