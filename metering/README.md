@@ -34,6 +34,14 @@ existing direct Codex sessions must be restarted/resumed once to pick up their
 new endpoint. Requests already using Router's Codex endpoint need no restart.
 Custom environment/project overrides can bypass these endpoints.
 
+Claude uses the same native curl HTTP/2 transport as Codex, with credentials
+passed through a private pipe. Router never automatically replays failed
+inference or changes accounts. Anthropic rate limits and retry headers pass
+through unchanged. Local `~/.router/claude-proxy-status.json` keeps the last
+50 response-header outcomes (time, route, status, byte count, elapsed time,
+and bounded transport error code). It contains no tokens, prompts, or replies;
+a 200 here means headers arrived, not that the entire stream completed.
+
 Only requests routed through these transports **after personal sign-in** are
 metered. Signing out stops collection. Shared provider percentages are never
 attributed to one person by subtraction; other apps/direct clients remain

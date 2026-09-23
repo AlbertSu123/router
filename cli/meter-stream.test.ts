@@ -36,3 +36,26 @@ test('Claude proxy authenticates exact credentials, fixes upstream host, rejects
   expect((await handler(request('/unrelated'))).status).toBe(404);expect(calls).toBe(1);
   expect(configureClaudeSettings({env:{KEEP:'yes'},hooks:{x:1}}).env.KEEP).toBe('yes');expect(()=>configureClaudeSettings({env:{ANTHROPIC_BASE_URL:'https://custom.example'}})).toThrow();
 });
+test('Claude transport failures expose only safe codes, never replay, and distinguish cancellation',async()=>{
+  for(const canceled of [false,true]){
+    let calls=0;const events:any[]=[];const controller=new AbortController();
+    const handler=createClaudeHandler({credentials:async()=>[{provider:'claude',profile:'one',accessToken:'secret'}],capture:async()=>r=>r,observe:e=>events.push(e),upstream:(async()=>{
+      calls++;if(canceled)controller.abort();throw Object.assign(new Error('private prompt and token'),{code:'ECONNRESET'});
+    }) as typeof fetch});
+    const response=await handler(new Request('http://localhost/v1/messages',{method:'POST',headers:{authorization:'Bearer secret'},body:'PRIVATE',signal:controller.signal}));
+    expect(response.status).toBe(canceled?499:502);expect(calls).toBe(1);
+    const result=await response.text();expect(result).not.toContain('private prompt');expect(result).not.toContain('secret');
+    expect(events[0].failure).toBe(canceled?'client_canceled':'ECONNRESET');expect(events[0].bytes).toBe(7);
+    expect(JSON.stringify(events)).not.toContain('PRIVATE');
+  }
+});
+test('Claude preserves rate limits and streams without replay; diagnostics cannot fail requests',async()=>{
+  for(const status of [200,429]){
+    let calls=0;const payload=status===200?'data: {"type":"message_stop"}\n\n':'{"type":"error","error":{"type":"rate_limit_error"}}';
+    const handler=createClaudeHandler({credentials:async()=>[{provider:'claude',profile:'one',accessToken:'secret'}],capture:async()=>r=>r,observe:()=>{throw new Error('disk unavailable')},upstream:(async()=>{
+      calls++;return new Response(payload,{status,headers:{'content-type':status===200?'text/event-stream':'application/json','retry-after':'60'}});
+    })as typeof fetch});
+    const response=await handler(new Request('http://localhost/v1/messages',{method:'POST',headers:{authorization:'Bearer secret'},body:'{}'}));
+    expect(response.status).toBe(status);expect(response.headers.get('retry-after')).toBe('60');expect(await response.text()).toBe(payload);expect(calls).toBe(1);
+  }
+});

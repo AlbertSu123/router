@@ -1,6 +1,7 @@
 import {readFileSync,existsSync,writeFileSync,mkdirSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
+import {codexTransport as nativeTransport} from './codex-transport.ts';
 import {personalSignIn,cancelPersonalSignIn} from './meter-login.ts';
 import {DIR,HOME,exitOnSigterm,reloadLaunchAgent} from './common.ts';
 import {meterAPI,meterSession,meterStatus,saveSession,syncMeter,beginMeter,readJSON,atomicJSON,type MeterCredential} from './meter-client.ts';
@@ -19,7 +20,8 @@ async function enableClaude(){
   if(!existsSync(join(DIR,'claude-settings-before-meter.json')))writeFileSync(join(DIR,'claude-settings-before-meter.json'),original,{mode:0o600});
   mkdirSync(join(HOME,'.claude'),{recursive:true});atomicJSON(CLAUDE_SETTINGS,next);
 }
-export function createClaudeHandler(options:{credentials:(force?:boolean)=>Promise<MeterCredential[]>;upstream?:typeof fetch;capture?:typeof beginMeter}){
+export type ClaudeObservation={at:string;path:string;status:number;bytes:number;elapsedMs:number;failure?:string};
+export function createClaudeHandler(options:{observe?:(event:ClaudeObservation)=>void;credentials:(force?:boolean)=>Promise<MeterCredential[]>;upstream?:typeof fetch;capture?:typeof beginMeter}){
   return async(request:Request)=>{
     if(request.headers.has('origin'))return new Response('Browser requests are not allowed',{status:403});
     const url=new URL(request.url);
@@ -36,12 +38,24 @@ export function createClaudeHandler(options:{credentials:(force?:boolean)=>Promi
     }
     const headers=new Headers();
     for(const [name,value]of request.headers)if(['authorization','x-api-key','accept','content-type','user-agent'].includes(name)||name.startsWith('anthropic-')||name.startsWith('x-stainless-'))headers.set(name,value);
+    const started=Date.now();let bytes=0;
+    const observe=(status:number,failure?:string)=>{try{options.observe?.({at:new Date().toISOString(),path:url.pathname,status,bytes,elapsedMs:Date.now()-started,...(failure?{failure}:{})})}catch{/* Diagnostics must not interrupt a request. */}};
     try{
-      const upstream=await(options.upstream??fetch)(`https://api.anthropic.com${url.pathname}${url.search}`,{method:request.method,headers,body:request.method==='POST'?await request.arrayBuffer():undefined,redirect:'error',signal:request.signal});
+      const body=request.method==='POST'?await request.arrayBuffer():undefined;bytes=body?.byteLength??0;
+      // Share the native HTTP/2 transport used by Codex. Never replay an inference
+      // after a network error: the provider may already have accepted it.
+      const upstream=await(options.upstream??nativeTransport)(`https://api.anthropic.com${url.pathname}${url.search}`,{method:request.method,headers,body,redirect:'error',signal:request.signal});
       const outgoing=new Headers(upstream.headers);for(const name of ['content-encoding','content-length','transfer-encoding','connection','set-cookie'])outgoing.delete(name);
       outgoing.set('cache-control','no-store');
+      observe(upstream.status);
       return wrap(new Response(upstream.body,{status:upstream.status,headers:outgoing}));
-    }catch{return wrap(Response.json({type:'error',error:{type:'api_error',message:'Router could not reach Claude'}},{status:502}))}
+    }catch(error){
+      const code=(error as {code?:unknown})?.code;
+      const canceled=request.signal.aborted;
+      const failure=canceled?'client_canceled':typeof code==='string'&&/^[A-Z_0-9]{1,64}$/.test(code)?code:'transport_error';
+      const status=canceled?499:502;observe(status,failure);
+      return wrap(Response.json({type:'error',error:{type:'api_error',message:canceled?'Router request canceled by client':`Router could not reach Claude (${failure}); retry this request.`}},{status}));
+    }
   };
 }
 export async function meterCommand(args:string[],credentials:()=>Promise<MeterCredential[]>){
@@ -96,7 +110,7 @@ export async function meterCommand(args:string[],credentials:()=>Promise<MeterCr
     };
     let syncing=false;
     const sync=async()=>{if(syncing||!meterSession())return;syncing=true;try{await syncMeter(await current())}catch{atomicJSON(join(DIR,'meter-sync-status.json'),{error:'Usage sync failed; data remains queued locally'})}finally{syncing=false}};
-    const server=Bun.serve({hostname:'127.0.0.1',port:18790,idleTimeout:0,maxRequestBodySize:64*1024*1024,fetch:createClaudeHandler({credentials:current}),error:()=>Response.json({error:'Router request failed'},{status:500})});
+    const server=Bun.serve({hostname:'127.0.0.1',port:18790,idleTimeout:0,maxRequestBodySize:64*1024*1024,fetch:createClaudeHandler({credentials:current,observe:event=>{const file=join(DIR,'claude-proxy-status.json');const previous=readJSON(file,{recent:[]});atomicJSON(file,{recent:[...(Array.isArray(previous.recent)?previous.recent:[]).slice(-49),event]})}}),error:()=>Response.json({error:'Router request failed'},{status:500})});
     void sync();const timer=setInterval(sync,60000);
     exitOnSigterm(server,()=>clearInterval(timer));return;
   }
