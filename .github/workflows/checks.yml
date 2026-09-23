@@ -9,6 +9,8 @@ jobs:
   checks:
     runs-on: macos-15
     timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -24,3 +26,11 @@ jobs:
         run: |
           swiftc menubar/Sources/Router/ResetTracking.swift menubar/Tests/ResetTrackingChecks.swift -o "$RUNNER_TEMP/reset-checks"
           "$RUNNER_TEMP/reset-checks"
+      - name: Menu bar rendering checks
+        run: |
+          sources=()
+          for source in menubar/Sources/Router/*.swift; do
+            [[ "$source" == */RouterApp.swift ]] || sources+=("$source")
+          done
+          swiftc "${sources[@]}" menubar/Tests/MenuBarRenderingChecks.swift -o "$RUNNER_TEMP/rendering-checks"
+          "$RUNNER_TEMP/rendering-checks"
