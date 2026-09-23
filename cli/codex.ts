@@ -674,7 +674,7 @@ export async function add(onUrl?: (url: string) => void, device = false, session
   writeBlob(name, auth);
   // A re-add of the account that is live also refreshes what Codex is
   // holding; anything else stays parked until it is switched to.
-  if (name === currentName()) writeAuth(auth);
+  if (name === currentName() && (!proxySelection() || readAuth()?.tokens?.account_id === auth.tokens?.account_id)) writeAuth(auth);
   return { name, email: id.email, plan: id.plan };
 }
 
@@ -736,7 +736,9 @@ export function use(name: string) {
   if (profiles[name].signedOutAt) throw new SignedOutError(PREFIX + name);
   const auth = readBlob(name);
   if (!auth?.tokens) fail(`codex profile "${name}" has no stored credential — re-add it`);
-  writeAuth(auth);
+  // Routed model selection must not change the desktop/browser identity.
+  // Direct mode retains the original credential-swap behavior.
+  if (!proxySelection()) writeAuth(auth);
   setCurrent(name);
   if (existsSync(PROXY_SELECTION)) setProxySelection(name);
 }

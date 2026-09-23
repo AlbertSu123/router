@@ -133,10 +133,14 @@ rather than the Keychain:
 router proxy install
 router proxy enable
 router proxy status
+router codex              # new routed terminal session
+router codex resume <id>  # resume an existing terminal conversation
 ```
 
-Relaunch existing Codex sessions once, resuming their original conversation
-IDs. Future `router use codex:<name>` and menu-bar switches apply on each
+Launch routed terminal sessions with `router codex` (or `router codex resume
+<id>`). The global provider remains the normal OpenAI login so desktop
+dictation, browser access, and desktop chats are not routed through the model
+proxy. Existing routed conversations continue to work. Future `router use codex:<name>` and menu-bar switches apply on each
 session's next request. Requests already streaming stay on their starting
 account. There is no automatic fallback: if the selected account is out of
 quota, select another account and retry in the same conversation.
@@ -154,14 +158,14 @@ are losslessly compressed with zstd; already encoded requests keep their encodin
 profile names, session IDs, timestamps, and HTTP status, never request bodies
 or tokens. Do not run `router proxy token` interactively or paste its output.
 
-Enabling backs up `~/.codex/config.toml` under `~/.router/` and adds the
-`router` model provider. `router proxy disable` removes only Router's managed
+Enabling backs up `~/.codex/config.toml` under `~/.router/` and adds an optional
+`router` model provider without making it the desktop default. `router proxy disable` removes only Router's managed
 configuration and restores the previous default provider while preserving
 other edits. The service stays available for existing routed sessions.
 
 To upgrade an older command-auth setup, rerun the install/enable commands
-above when no responses are streaming, then resume each existing Codex
-conversation once. Enable upgrades only Router's marked provider block and
+above when no responses are streaming, then use `router codex` for terminal sessions. If the desktop app previously
+showed OpenAI via Router, quit and reopen it once to reload the direct provider. Enable upgrades only Router's marked provider block and
 saves a separate pre-upgrade backup; it preserves the original disable backup.
 Older sessions can still use the previous local bearer-token authentication.
 The incoming ChatGPT credential and local token are never forwarded upstream:
@@ -177,9 +181,10 @@ and the Swift build/reset checks. They cover both authentication modes,
 account switching, credential isolation, old-config migration and backups,
 idempotent enable/disable, and launchd's delayed shutdown during upgrades.
 
-Desktop Codex clients that read the same config may also use this provider
-after relaunch; desktop UI identity and ChatGPT chat traffic are not switched
-by this proxy. Provider-filtered history lists may hide conversations created
+In proxy mode, changing the selected model account no longer swaps the shared
+`auth.json`, so desktop/browser identity stays signed in to its own account.
+Normal token renewal for that same identity is still persisted. Direct mode
+(with the proxy disabled) retains the original credential-swap behavior. Provider-filtered history lists may hide conversations created
 with the old provider; explicit `codex resume <session-id>` preserves them.
 
 State lives in `~/.router/` (no credentials on disk; they stay in the

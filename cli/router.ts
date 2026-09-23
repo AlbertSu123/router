@@ -27,7 +27,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 import * as codex from "./codex.ts";
-import { proxyCommand, proxyDoctor } from "./proxy-control.ts";
+import { proxyCommand, proxyDoctor, terminalCodexArgs } from "./proxy-control.ts";
 import { meterCommand } from "./meter-control.ts";
 import type { MeterCredential } from "./meter-client.ts";
 import {
@@ -969,6 +969,7 @@ usage:
   router proxy enable    route Codex requests through Router
   router proxy disable   restore the previous Codex provider
   router proxy status    show recent routing results (no prompts or tokens)
+  router codex [args...] launch a routed terminal session, leaving desktop direct
 
 "main" is the normal Claude Code keychain login. A Claude switch swaps the
 keychain credential, so running sessions follow on their next request (about
@@ -979,6 +980,12 @@ restarting. Direct Codex sessions adopt a switch when relaunched.`);
 const [cmd, ...rest] = process.argv.slice(2);
 try {
   switch (cmd) {
+    case "codex": {
+      const child = Bun.spawn([codex.codex().bin, ...terminalCodexArgs(rest)], {
+        stdin: "inherit", stdout: "inherit", stderr: "inherit", env: codex.codexEnv(),
+      });
+      process.exit(await child.exited);
+    }
     case "proxy": await proxyCommand(rest); break;
     case "meter": await meterCommand(rest, meteringCredentials); break;
     case "add": await cmdAdd(rest); break;

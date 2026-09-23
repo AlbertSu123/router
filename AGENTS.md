@@ -75,7 +75,10 @@ router doctor    # every line must start with "ok"
 - Switching Codex accounts (`router use codex:<name>`) applies to Codex
   sessions started afterwards when using direct authentication. With
   `router proxy install` and `router proxy enable`, running routed sessions
-  switch on their next request. Existing direct sessions must be relaunched
+  launched with `router codex` switch on their next request. Never set the
+  shared default provider to Router: desktop dictation and desktop login must
+  remain direct. Routed account selection must not swap the desktop identity.
+  Existing direct sessions must be relaunched
   once, resuming their original conversation IDs. Never claim a streaming
   request moved accounts or silently fall back to another profile.
 - Statusline integration is optional; see README "Statusline".

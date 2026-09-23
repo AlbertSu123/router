@@ -101,6 +101,7 @@ jwt='x.'+base64.urlsafe_b64encode(json.dumps({'email':'fixture@example.test'}).e
         (self.live/'auth.json').write_text(json.dumps(a))
         p=self.command('use','codex:b');p.communicate(timeout=5);self.assertEqual(p.returncode,0)
         self.assertEqual((self.state/'codex-proxy-selection').read_text().strip(),'b')
+        self.assertEqual(json.loads((self.live/'auth.json').read_text()),a) # desktop identity stays put
         (self.live/'auth.json').write_text(json.dumps(a))
         p=self.command('list','--json');p.communicate(timeout=5);self.assertEqual(p.returncode,0)
         self.assertEqual((self.state/'codex-current').read_text().strip(),'b')
@@ -109,7 +110,10 @@ jwt='x.'+base64.urlsafe_b64encode(json.dumps({'email':'fixture@example.test'}).e
         stale=auth('b','2026-01-01T00:00:00Z');stale['tokens']['refresh_token']='stale'
         (self.live/'auth.json').write_text(json.dumps(stale))
         p=self.command('use','codex:b');p.communicate(timeout=5);self.assertEqual(p.returncode,0)
-        self.assertEqual(json.loads((self.live/'auth.json').read_text())['tokens']['refresh_token'],'fake-b')
+        self.assertEqual(json.loads((self.live/'auth.json').read_text())['tokens']['refresh_token'],'stale') # routed switches never rewrite desktop auth
+        (self.state/'codex-proxy-selection').unlink()
+        p=self.command('use','codex:b');p.communicate(timeout=5);self.assertEqual(p.returncode,0)
+        self.assertEqual(json.loads((self.live/'auth.json').read_text())['tokens']['refresh_token'],'fake-b') # direct mode still swaps credentials
     def test_failure_expiry_and_bad_credentials(self):
         for mode in ['failure','expire','malformed']:
             with self.subTest(mode=mode):

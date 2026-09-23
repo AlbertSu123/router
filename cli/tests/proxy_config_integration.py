@@ -54,6 +54,17 @@ class ProxyConfigTests(unittest.TestCase):
         self.assertNotEqual(self.run_cli('enable', old=True).returncode, 0)
         self.assertEqual(self.config.read_text(), self.original)
         self.assertFalse((self.state/'codex-config-before-proxy.toml').exists())
+    def test_terminal_launcher_scopes_provider_and_leaves_app_server_direct(self):
+        binary=self.root/'codex-fixture'
+        binary.write_text('#!/usr/bin/env python3\nimport json,sys\nprint("codex-fixture" if "--version" in sys.argv else json.dumps(sys.argv[1:]))\n')
+        binary.chmod(0o700)
+        def run(*args):
+            p=subprocess.run([BUN,str(REPO/'cli/router.ts'),'codex',*args],env={**self.env,'ROUTER_CODEX_BIN':str(binary)},capture_output=True,text=True,timeout=10,check=True)
+            return json.loads(p.stdout)
+        self.assertEqual(run('resume','test-session'),['-c','model_provider="router"','resume','test-session'])
+        self.assertEqual(run('app-server'),['app-server'])
+        self.assertEqual(run('login'),['login'])
+        self.assertEqual(self.config.read_text(),self.original)
     def test_doctor_detects_regression(self):
         self.assertEqual(self.run_cli('enable').returncode, 0)
         script = 'import {proxyDoctor} from '+json.dumps(str(REPO/'cli/proxy-control.ts'))+'; const result=[]; await proxyDoctor((ok,message)=>result.push({ok,message})); console.log(JSON.stringify(result));'
@@ -62,7 +73,7 @@ class ProxyConfigTests(unittest.TestCase):
             return json.loads(p.stdout)
         self.assertTrue(all(x['ok'] for x in check()))
         self.config.write_text(self.config.read_text().replace('requires_openai_auth = true','requires_openai_auth = false'))
-        result=check(); self.assertFalse(result[0]['ok'])
+        result=check(); self.assertFalse(result[1]['ok'])
         self.assertNotIn(TOKEN,json.dumps(result))
 
 if __name__ == '__main__': unittest.main(verbosity=2)

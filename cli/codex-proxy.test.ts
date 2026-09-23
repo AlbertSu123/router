@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createProxyHandler, type ProxyCredential } from "./codex-proxy.ts";
-import { configureProxy, unconfigureProxy } from "./proxy-control.ts";
+import { configureProxy, unconfigureProxy, terminalCodexArgs } from "./proxy-control.ts";
 import { SignedOutError } from "./common.ts";
 
 const accounts: Record<string, ProxyCredential> = {
@@ -81,7 +81,7 @@ test("rejects browser origins, missing tokens, arbitrary routes and never falls 
 test("enable/disable preserves unrelated config edits and the original provider", () => {
   const original = 'model_provider = "previous"\nmodel = "gpt-6-astra"\n[features]\nfoo = true\n';
   const configured = configureProxy(original, 18789, "a".repeat(64));
-  expect((Bun.TOML.parse(configured) as any).model_provider).toBe("router");
+  expect((Bun.TOML.parse(configured) as any).model_provider).toBe("previous");
   expect(configureProxy(configured, 18789, "a".repeat(64))).toBe(configured);
   const restored = unconfigureProxy(configured.replace("foo = true", "foo = false"), original);
   expect((Bun.TOML.parse(restored) as any).model_provider).toBe("previous");
@@ -167,4 +167,18 @@ test("compresses large conversation uploads losslessly and never retries failed 
   const response = await handler(new Request('http://127.0.0.1/v1/responses',{method:'POST',headers:{authorization:'Bearer local','content-type':'application/json'},body:original}));
   expect(response.status).toBe(502);
   expect(calls).toBe(1);
+});
+
+
+test("terminal routing never becomes the desktop default", () => {
+  const configured = configureProxy('model_provider = "openai"\n', 18789, "a".repeat(64));
+  const legacy = configured.replace('model_provider = "openai"', 'model_provider = "router"');
+  const migrated = configureProxy(legacy, 18789, "a".repeat(64));
+  expect((Bun.TOML.parse(migrated) as any).model_provider).toBe("openai");
+  expect(terminalCodexArgs(["resume", "session-id"])).toEqual(["-c", 'model_provider="router"', "resume", "session-id"]);
+  expect(terminalCodexArgs(["app-server"])).toEqual(["app-server"]);
+  expect(terminalCodexArgs(["login"])).toEqual(["login"]);
+  expect(terminalCodexArgs(["-s", "danger-full-access", "app-server"])).toEqual(["-s", "danger-full-access", "app-server"]);
+  expect(terminalCodexArgs(["resume", "login"])).toEqual(["-c", 'model_provider="router"', "resume", "login"]);
+  expect(terminalCodexArgs(["-c", 'model_provider="openai"'])).toEqual(["-c", 'model_provider="router"', "-c", 'model_provider="openai"']);
 });
