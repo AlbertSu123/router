@@ -3,7 +3,7 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {gzip} from 'node:zlib';
 import {promisify} from 'node:util';
-import {codexTransport as nativeTransport} from './codex-transport.ts';
+import {claudeTransport} from './claude-transport.ts';
 import {personalSignIn,cancelPersonalSignIn} from './meter-login.ts';
 import {DIR,HOME,exitOnSigterm,reloadLaunchAgent} from './common.ts';
 import {meterAPI,meterSession,meterStatus,saveSession,syncMeter,beginMeter,readJSON,atomicJSON,type MeterCredential} from './meter-client.ts';
@@ -23,12 +23,12 @@ async function enableClaude(){
   if(!existsSync(join(DIR,'claude-settings-before-meter.json')))writeFileSync(join(DIR,'claude-settings-before-meter.json'),original,{mode:0o600});
   mkdirSync(join(HOME,'.claude'),{recursive:true});atomicJSON(CLAUDE_SETTINGS,next);
 }
-export type ClaudeObservation={at:string;path:string;status:number;bytes:number;wireBytes:number;encoding:string|null;elapsedMs:number;failure?:string};
+export type ClaudeObservation={at:string;path:string;status:number;bytes:number;wireBytes:number;encoding:string|null;elapsedMs:number;failure?:string;uploadAttempts:number};
 export function createClaudeHandler(options:{observe?:(event:ClaudeObservation)=>void;credentials:(force?:boolean)=>Promise<MeterCredential[]>;upstream?:typeof fetch;capture?:typeof beginMeter}){
   return async(request:Request)=>{
     if(request.headers.has('origin'))return new Response('Browser requests are not allowed',{status:403});
     const url=new URL(request.url);
-    if(url.pathname==='/health'&&request.method==='GET')return Response.json({service:'router-claude-meter',version:2,requestCompression:'gzip'});
+    if(url.pathname==='/health'&&request.method==='GET')return Response.json({service:'router-claude-meter',version:3,requestCompression:'gzip',uploadRecovery:'incomplete-only'});
     if(!['/v1/messages','/v1/messages/count_tokens','/v1/models'].includes(url.pathname)||!['GET','POST'].includes(request.method))return new Response('Not found',{status:404});
     const token=request.headers.get('authorization')?.replace(/^Bearer /,'')??request.headers.get('x-api-key');
     if(!token)return new Response('Claude subscription sign-in required',{status:401});
@@ -41,8 +41,8 @@ export function createClaudeHandler(options:{observe?:(event:ClaudeObservation)=
     }
     const headers=new Headers();
     for(const [name,value]of request.headers)if(['authorization','x-api-key','accept','content-type','content-encoding','user-agent'].includes(name)||name.startsWith('anthropic-')||name.startsWith('x-stainless-'))headers.set(name,value);
-    const started=Date.now();let bytes=0,wireBytes=0;
-    const observe=(status:number,failure?:string)=>{try{options.observe?.({at:new Date().toISOString(),path:url.pathname,status,bytes,wireBytes,encoding:headers.get('content-encoding')?.slice(0,24)??null,elapsedMs:Date.now()-started,...(failure?{failure}:{})})}catch{/* Diagnostics must not interrupt a request. */}};
+    const started=Date.now();let bytes=0,wireBytes=0,uploadAttempts=1;
+    const observe=(status:number,failure?:string)=>{try{options.observe?.({at:new Date().toISOString(),path:url.pathname,status,bytes,wireBytes,uploadAttempts,encoding:headers.get('content-encoding')?.slice(0,24)??null,elapsedMs:Date.now()-started,...(failure?{failure}:{})})}catch{/* Diagnostics must not interrupt a request. */}};
     try{
       let body:ArrayBuffer|Uint8Array|undefined=request.method==='POST'?await request.arrayBuffer():undefined;
       bytes=body?.byteLength??0;wireBytes=bytes;
@@ -54,14 +54,16 @@ export function createClaudeHandler(options:{observe?:(event:ClaudeObservation)=
         if(compressed.byteLength<bytes){body=compressed;headers.set('content-encoding','gzip');wireBytes=body.byteLength;}
       }
       request.signal.throwIfAborted();
-      // Share the native HTTP/2 transport used by Codex. Never replay an inference
-      // after a network error: the provider may already have accepted it.
-      const upstream=await(options.upstream??nativeTransport)(`https://api.anthropic.com${url.pathname}${url.search}`,{method:request.method,headers,body,redirect:'error',signal:request.signal});
+      // Retry only uploads proven incomplete; never replay an accepted request.
+      const upstream=await(options.upstream??claudeTransport)(`https://api.anthropic.com${url.pathname}${url.search}`,{method:request.method,headers,body,redirect:'error',signal:request.signal});
       const outgoing=new Headers(upstream.headers);for(const name of ['content-encoding','content-length','transfer-encoding','connection','set-cookie'])outgoing.delete(name);
       outgoing.set('cache-control','no-store');
+      uploadAttempts=Number(upstream.headers.get('x-router-upload-attempts'))||1;
       observe(upstream.status);
       return wrap(new Response(upstream.body,{status:upstream.status,headers:outgoing}));
     }catch(error){
+      const attempts=(error as {uploadAttempts?:number})?.uploadAttempts;
+      if(Number.isSafeInteger(attempts)&&attempts!>=1&&attempts!<=5)uploadAttempts=attempts!;
       const code=(error as {code?:unknown})?.code;
       const canceled=request.signal.aborted;
       const failure=canceled?'client_canceled':typeof code==='string'&&/^[A-Z_0-9]{1,64}$/.test(code)?code:'transport_error';

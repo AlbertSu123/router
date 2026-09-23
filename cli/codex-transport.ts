@@ -10,6 +10,7 @@ export const codexTransport: typeof fetch = (async (input: string | URL | Reques
   signal?.throwIfAborted();
   const args = ['--disable','--silent','--show-error',url.protocol==='https:'?'--http2':'--http1.1','--no-buffer','--include',
     '--connect-timeout','15','--speed-time','300','--speed-limit','1',
+    '--write-out','%{stderr}\nROUTER_TRANSFER_METRICS:%{size_upload}:%{http_code}\n',
     '--request',init?.method ?? 'GET','--config','/dev/fd/3'];
   if(init?.body != null)args.push('--data-binary','@-');
   args.push('--url',url.href);
@@ -22,8 +23,11 @@ export const codexTransport: typeof fetch = (async (input: string | URL | Reques
   const abort=()=>{child.kill('SIGTERM')};
   signal?.addEventListener('abort',abort,{once:true});
   child.once('close',()=>signal?.removeEventListener('abort',abort));
-  // Drain stderr without exposing provider details or credentials.
-  child.stderr!.resume();
+  // Keep a bounded tail only to parse curl's numeric transfer counters. Never
+  // expose stderr, which can include provider details. The upload count lets a
+  // caller distinguish an incomplete upload from an ambiguously accepted one.
+  let stderrTail='';
+  child.stderr!.on('data',chunk=>{stderrTail=(stderrTail+chunk.toString()).slice(-4096)});
   child.stdin!.on('error',()=>{});
   const config=child.stdio[3] as Writable;
   config.on('error',()=>{});
@@ -34,8 +38,13 @@ export const codexTransport: typeof fetch = (async (input: string | URL | Reques
   config.end([...headers].map(([key,value])=>`header = ${quoted(key+': '+value)}\n`).join(''));
   child.stdin!.end(init?.body instanceof ArrayBuffer?Buffer.from(init.body):init?.body??undefined);
   if(signal?.aborted)abort();
-  const failure=(code:number)=>Object.assign(new Error(signal?.aborted?'Client canceled request':'Provider transport failed'),
-    {code:signal?.aborted?'ABORT_ERR':code===28?'ETIMEDOUT':`CURL_${code}`,routerPhase:'request'});
+  const failure=(code:number)=>{
+    const counters=/(?:^|\n)ROUTER_TRANSFER_METRICS:(\d{1,12}):(\d{3})\s*$/.exec(stderrTail);
+    return Object.assign(new Error(signal?.aborted?'Client canceled request':'Provider transport failed'),
+      {code:signal?.aborted?'ABORT_ERR':code===28?'ETIMEDOUT':`CURL_${code}`,routerPhase:'request',
+       uploadedBytes:counters?Number(counters[1]):undefined,httpStatus:counters?Number(counters[2]):undefined,
+       responseStarted:status!==0});
+  };
   const iterator=child.stdout![Symbol.asyncIterator]();
   let buffer=Buffer.alloc(0),status=0;
   const responseHeaders=new Headers();

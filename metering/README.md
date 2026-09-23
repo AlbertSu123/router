@@ -37,10 +37,12 @@ Custom environment/project overrides can bypass these endpoints.
 Claude uses the same native curl HTTP/2 transport as Codex, with credentials
 passed through a private pipe. Large Claude request bodies are losslessly gzip
 compressed before upload when that reduces their size; client-supplied encodings
-are preserved. No messages or tool results are removed. Router never automatically replays failed
-inference or changes accounts. Anthropic rate limits and retry headers pass
+are preserved. No messages or tool results are removed. For Claude, Router retries
+connection send/receive failures only when curl proves the upload was incomplete
+and no response started (at most five attempts, with backoff). Fully uploaded or
+ambiguous requests and started streams are never replayed; accounts never change. Anthropic rate limits and retry headers pass
 through unchanged. Local `~/.router/claude-proxy-status.json` keeps the last
-50 response-header outcomes (time, route, status, original and transmitted byte counts, encoding, elapsed time,
+50 response-header outcomes (time, route, status, original and transmitted byte counts, encoding, upload attempts, elapsed time,
 and bounded transport error code). It contains no tokens, prompts, or replies;
 a 200 here means headers arrived, not that the entire stream completed.
 
