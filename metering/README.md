@@ -35,7 +35,10 @@ new endpoint. Requests already using Router's Codex endpoint need no restart.
 Custom environment/project overrides can bypass these endpoints.
 
 Claude uses the same native curl HTTP/2 transport as Codex, with credentials
-passed through a private pipe. Large Claude request bodies are losslessly gzip
+passed through stdin. Request bodies use an owner-only buffer file that is
+unlinked before any content is written and held only by a descriptor until
+curl exits. No named body file or credential file is retained. This avoids
+concurrent extra-pipe configuration read failures. Large Claude request bodies are losslessly gzip
 compressed before upload when that reduces their size; client-supplied encodings
 are preserved. No messages or tool results are removed. For Claude, Router retries
 connection send/receive failures only when curl proves the upload was incomplete

@@ -1,8 +1,14 @@
 import { spawn } from 'node:child_process';
-import { type Writable } from 'node:stream';
+import {openSync,writeSync,unlinkSync,closeSync} from 'node:fs';
+import {randomUUID} from 'node:crypto';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
 
 // Use macOS's native libcurl transport for HTTP/2 uploads. Credentials travel
-// through an inherited pipe, never argv, a shell, a temporary file, or logs.
+// through stdin, never argv, a shell, a temporary file, or logs. The body uses
+// an owner-only file unlinked BEFORE writing; only its inherited descriptor
+// remains until curl exits. Avoid Bun's extra piped stdio: concurrent large
+// writes intermittently break curl's /dev/fd configuration reads (CURL_26).
 // Do not retry inference: a failed upload might already have been accepted.
 export const codexTransport: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = new URL(input instanceof Request ? input.url : input);
@@ -11,10 +17,15 @@ export const codexTransport: typeof fetch = (async (input: string | URL | Reques
   const args = ['--disable','--silent','--show-error',url.protocol==='https:'?'--http2':'--http1.1','--no-buffer','--include',
     '--connect-timeout','15','--speed-time','300','--speed-limit','1',
     '--write-out','%{stderr}\nROUTER_TRANSFER_METRICS:%{size_upload}:%{http_code}\n',
-    '--request',init?.method ?? 'GET','--config','/dev/fd/3'];
-  if(init?.body != null)args.push('--data-binary','@-');
+    '--request',init?.method ?? 'GET','--config','-'];
+  if(init?.body != null)args.push('--data-binary','@/dev/fd/3');
   args.push('--url',url.href);
-  const child=spawn('/usr/bin/curl',args,{stdio:['pipe','pipe','pipe','pipe']});
+  let bodyFD=init?.body==null?undefined:anonymousBody(init.body);
+  const releaseBody=()=>{if(bodyFD!==undefined){const fd=bodyFD;bodyFD=undefined;closeSync(fd)}};
+  let child:ReturnType<typeof spawn>;
+  try{child=spawn('/usr/bin/curl',args,{stdio:['pipe','pipe','pipe',bodyFD??'ignore']})}
+  catch(error){releaseBody();throw error}
+  child.once('close',releaseBody);
   let spawnError:Error|undefined;
   const exited=new Promise<number>(resolve=>{
     child.once('error',e=>{spawnError=e;resolve(-1)});
@@ -29,14 +40,13 @@ export const codexTransport: typeof fetch = (async (input: string | URL | Reques
   let stderrTail='';
   child.stderr!.on('data',chunk=>{stderrTail=(stderrTail+chunk.toString()).slice(-4096)});
   child.stdin!.on('error',()=>{});
-  const config=child.stdio[3] as Writable;
-  config.on('error',()=>{});
+
   const headers=new Headers(init?.headers);
   headers.set('accept-encoding','identity');
   headers.set('expect','');
   const quoted=(s:string)=>'"'+s.replaceAll('\\','\\\\').replaceAll('"','\\"').replaceAll('\n','\\n').replaceAll('\r','\\r')+'"';
-  config.end([...headers].map(([key,value])=>`header = ${quoted(key+': '+value)}\n`).join(''));
-  child.stdin!.end(init?.body instanceof ArrayBuffer?Buffer.from(init.body):init?.body??undefined);
+  child.stdin!.end([...headers].map(([key,value])=>`header = ${quoted(key+': '+value)}\n`).join(''));
+
   if(signal?.aborted)abort();
   const failure=(code:number)=>{
     const counters=/(?:^|\n)ROUTER_TRANSFER_METRICS:(\d{1,12}):(\d{3})\s*$/.exec(stderrTail);
@@ -85,3 +95,22 @@ export const codexTransport: typeof fetch = (async (input: string | URL | Reques
     return new Response(stream,{status,headers:responseHeaders});
   } catch(e) {abort();await iterator.return?.();throw e;}
 }) as typeof fetch;
+
+function anonymousBody(body:BodyInit):number {
+  const bytes=typeof body==='string'?Buffer.from(body)
+    :body instanceof ArrayBuffer?Buffer.from(body)
+    :ArrayBuffer.isView(body)?Buffer.from(body.buffer,body.byteOffset,body.byteLength):null;
+  if(!bytes)throw new TypeError('Native transport requires a buffered request body');
+  const path=join(tmpdir(),'.router-body-'+randomUUID());
+  const fd=openSync(path,'wx+',0o600);
+  try{
+    unlinkSync(path); // Never leave a named file containing conversation data.
+    let offset=0;
+    while(offset<bytes.byteLength){
+      const written=writeSync(fd,bytes,offset,bytes.byteLength-offset,offset);
+      if(written===0)throw new Error('Could not buffer request body');
+      offset+=written;
+    }
+    return fd;
+  }catch(error){closeSync(fd);try{unlinkSync(path)}catch{};throw error}
+}

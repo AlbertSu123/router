@@ -45,3 +45,27 @@ test('does not replay inference or expose stderr when the provider resets the co
     expect(requests).toBe(1);
   } finally {server.closeAllConnections();server.close()}
 });
+test('concurrent uploads keep configuration and large payloads isolated without named body files',async()=>{
+  const {randomBytes,createHash}=await import('node:crypto');
+  const {readdirSync}=await import('node:fs');const {tmpdir}=await import('node:os');
+  const namedBodies=()=>readdirSync(tmpdir()).filter(n=>n.startsWith('.router-body-')).sort();
+  const before=namedBodies();let received=0;
+  const server=Bun.serve({hostname:'127.0.0.1',port:0,idleTimeout:0,maxRequestBodySize:8*1024*1024,
+    async fetch(request){
+      const tag=new URL(request.url).pathname.slice(1);
+      expect(request.headers.get('authorization')).toBe('Bearer credential-'+tag);
+      expect(namedBodies()).toEqual(before);
+      const body=await request.arrayBuffer();
+      expect(createHash('sha256').update(new Uint8Array(body)).digest('hex')).toBe(request.headers.get('x-body-sha256'));
+      received++;return new Response('ok');
+    }});
+  try{
+    for(let batch=0;batch<5;batch++)await Promise.all(Array.from({length:10},async(_,i)=>{
+      const tag=String(batch*10+i);const body=randomBytes(3*1024*1024+i);
+      const response=await codexTransport(`http://127.0.0.1:${server.port}/${tag}`,{method:'POST',body,
+        headers:{authorization:'Bearer credential-'+tag,'x-body-sha256':createHash('sha256').update(body).digest('hex')}});
+      expect(response.status).toBe(200);expect(await response.text()).toBe('ok');
+    }));
+    expect(received).toBe(50);expect(namedBodies()).toEqual(before);
+  }finally{await server.stop(true)}
+});

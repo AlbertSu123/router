@@ -28,7 +28,7 @@ export function createClaudeHandler(options:{observe?:(event:ClaudeObservation)=
   return async(request:Request)=>{
     if(request.headers.has('origin'))return new Response('Browser requests are not allowed',{status:403});
     const url=new URL(request.url);
-    if(url.pathname==='/health'&&request.method==='GET')return Response.json({service:'router-claude-meter',version:3,requestCompression:'gzip',uploadRecovery:'incomplete-only'});
+    if(url.pathname==='/health'&&request.method==='GET')return Response.json({service:'router-claude-meter',version:4,requestCompression:'gzip',uploadRecovery:'incomplete-only',requestBodyTransport:'anonymous-fd'});
     if(!['/v1/messages','/v1/messages/count_tokens','/v1/models'].includes(url.pathname)||!['GET','POST'].includes(request.method))return new Response('Not found',{status:404});
     const token=request.headers.get('authorization')?.replace(/^Bearer /,'')??request.headers.get('x-api-key');
     if(!token)return new Response('Claude subscription sign-in required',{status:401});
