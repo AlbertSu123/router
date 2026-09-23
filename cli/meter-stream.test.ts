@@ -59,3 +59,30 @@ test('Claude preserves rate limits and streams without replay; diagnostics canno
     expect(response.status).toBe(status);expect(response.headers.get('retry-after')).toBe('60');expect(await response.text()).toBe(payload);expect(calls).toBe(1);
   }
 });
+test('large Claude histories are compressed losslessly and encoded client bodies remain untouched',async()=>{
+  const {gzipSync,gunzipSync}=await import('node:zlib');
+  const original=Buffer.from(JSON.stringify({model:'test',messages:[{role:'user',content:'all conversation data stays present '.repeat(250000)}]}));
+  for(const preencoded of [false,true]){
+    const payload=preencoded?gzipSync(original):original;const events:any[]=[];let calls=0;
+    const handler=createClaudeHandler({credentials:async()=>[{provider:'claude',profile:'one',accessToken:'secret'}],capture:async()=>r=>r,observe:e=>events.push(e),upstream:(async(_url,init)=>{
+      calls++;expect(new Headers(init!.headers).get('content-encoding')).toBe('gzip');
+      const sent=Buffer.from(init!.body as Uint8Array);expect(gunzipSync(sent).equals(original)).toBe(true);
+      if(preencoded)expect(sent.equals(payload)).toBe(true);else expect(sent.length).toBeLessThan(original.length/10);
+      return new Response('data: {"type":"message_stop"}\n\n',{headers:{'content-type':'text/event-stream'}});
+    })as typeof fetch});
+    const response=await handler(new Request('http://localhost/v1/messages',{method:'POST',headers:{authorization:'Bearer secret',...(preencoded?{'content-encoding':'gzip'}:{})},body:payload}));
+    expect(response.status).toBe(200);expect(await response.text()).toContain('message_stop');expect(calls).toBe(1);
+    expect(events[0].bytes).toBe(payload.length);expect(events[0].encoding).toBe('gzip');
+    expect(events[0].wireBytes).toBeLessThanOrEqual(payload.length);
+  }
+});
+test('Claude leaves small or incompressible bodies unencoded',async()=>{
+  const {randomBytes}=await import('node:crypto');
+  for(const payload of [Buffer.from('{}'),randomBytes(65536)]){
+    const handler=createClaudeHandler({credentials:async()=>[{provider:'claude',profile:'one',accessToken:'secret'}],upstream:(async(_url,init)=>{
+      expect(new Headers(init!.headers).has('content-encoding')).toBe(false);
+      expect(Buffer.from(init!.body as ArrayBuffer).equals(payload)).toBe(true);return Response.json({input_tokens:1});
+    })as typeof fetch});
+    expect((await handler(new Request('http://localhost/v1/messages/count_tokens',{method:'POST',headers:{authorization:'Bearer secret'},body:payload}))).status).toBe(200);
+  }
+});

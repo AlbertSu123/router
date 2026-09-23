@@ -35,10 +35,12 @@ new endpoint. Requests already using Router's Codex endpoint need no restart.
 Custom environment/project overrides can bypass these endpoints.
 
 Claude uses the same native curl HTTP/2 transport as Codex, with credentials
-passed through a private pipe. Router never automatically replays failed
+passed through a private pipe. Large Claude request bodies are losslessly gzip
+compressed before upload when that reduces their size; client-supplied encodings
+are preserved. No messages or tool results are removed. Router never automatically replays failed
 inference or changes accounts. Anthropic rate limits and retry headers pass
 through unchanged. Local `~/.router/claude-proxy-status.json` keeps the last
-50 response-header outcomes (time, route, status, byte count, elapsed time,
+50 response-header outcomes (time, route, status, original and transmitted byte counts, encoding, elapsed time,
 and bounded transport error code). It contains no tokens, prompts, or replies;
 a 200 here means headers arrived, not that the entire stream completed.
 

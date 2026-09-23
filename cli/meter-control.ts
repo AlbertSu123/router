@@ -1,10 +1,13 @@
 import {readFileSync,existsSync,writeFileSync,mkdirSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
+import {gzip} from 'node:zlib';
+import {promisify} from 'node:util';
 import {codexTransport as nativeTransport} from './codex-transport.ts';
 import {personalSignIn,cancelPersonalSignIn} from './meter-login.ts';
 import {DIR,HOME,exitOnSigterm,reloadLaunchAgent} from './common.ts';
 import {meterAPI,meterSession,meterStatus,saveSession,syncMeter,beginMeter,readJSON,atomicJSON,type MeterCredential} from './meter-client.ts';
+const gzipAsync=promisify(gzip);
 const PENDING=join(DIR,'meter-login.json'), LABEL='dev.bryan.router.metering';
 const CLAUDE_SETTINGS=join(HOME,'.claude/settings.json');
 const BASE='http://127.0.0.1:18790';
@@ -20,12 +23,12 @@ async function enableClaude(){
   if(!existsSync(join(DIR,'claude-settings-before-meter.json')))writeFileSync(join(DIR,'claude-settings-before-meter.json'),original,{mode:0o600});
   mkdirSync(join(HOME,'.claude'),{recursive:true});atomicJSON(CLAUDE_SETTINGS,next);
 }
-export type ClaudeObservation={at:string;path:string;status:number;bytes:number;elapsedMs:number;failure?:string};
+export type ClaudeObservation={at:string;path:string;status:number;bytes:number;wireBytes:number;encoding:string|null;elapsedMs:number;failure?:string};
 export function createClaudeHandler(options:{observe?:(event:ClaudeObservation)=>void;credentials:(force?:boolean)=>Promise<MeterCredential[]>;upstream?:typeof fetch;capture?:typeof beginMeter}){
   return async(request:Request)=>{
     if(request.headers.has('origin'))return new Response('Browser requests are not allowed',{status:403});
     const url=new URL(request.url);
-    if(url.pathname==='/health'&&request.method==='GET')return Response.json({service:'router-claude-meter',version:1});
+    if(url.pathname==='/health'&&request.method==='GET')return Response.json({service:'router-claude-meter',version:2,requestCompression:'gzip'});
     if(!['/v1/messages','/v1/messages/count_tokens','/v1/models'].includes(url.pathname)||!['GET','POST'].includes(request.method))return new Response('Not found',{status:404});
     const token=request.headers.get('authorization')?.replace(/^Bearer /,'')??request.headers.get('x-api-key');
     if(!token)return new Response('Claude subscription sign-in required',{status:401});
@@ -37,11 +40,20 @@ export function createClaudeHandler(options:{observe?:(event:ClaudeObservation)=
       try{wrap=await (options.capture??beginMeter)(credential)}catch{return Response.json({type:'error',error:{type:'api_error',message:'Router could not verify usage attribution. Open Router to refresh subscription access.'}},{status:503})}
     }
     const headers=new Headers();
-    for(const [name,value]of request.headers)if(['authorization','x-api-key','accept','content-type','user-agent'].includes(name)||name.startsWith('anthropic-')||name.startsWith('x-stainless-'))headers.set(name,value);
-    const started=Date.now();let bytes=0;
-    const observe=(status:number,failure?:string)=>{try{options.observe?.({at:new Date().toISOString(),path:url.pathname,status,bytes,elapsedMs:Date.now()-started,...(failure?{failure}:{})})}catch{/* Diagnostics must not interrupt a request. */}};
+    for(const [name,value]of request.headers)if(['authorization','x-api-key','accept','content-type','content-encoding','user-agent'].includes(name)||name.startsWith('anthropic-')||name.startsWith('x-stainless-'))headers.set(name,value);
+    const started=Date.now();let bytes=0,wireBytes=0;
+    const observe=(status:number,failure?:string)=>{try{options.observe?.({at:new Date().toISOString(),path:url.pathname,status,bytes,wireBytes,encoding:headers.get('content-encoding')?.slice(0,24)??null,elapsedMs:Date.now()-started,...(failure?{failure}:{})})}catch{/* Diagnostics must not interrupt a request. */}};
     try{
-      const body=request.method==='POST'?await request.arrayBuffer():undefined;bytes=body?.byteLength??0;
+      let body:ArrayBuffer|Uint8Array|undefined=request.method==='POST'?await request.arrayBuffer():undefined;
+      bytes=body?.byteLength??0;wireBytes=bytes;
+      // Long Claude histories can exceed 25 MB. Anthropic accepts gzip request
+      // bodies; compress losslessly before sending, never trim conversation data.
+      // Preserve a client's encoding verbatim and skip unhelpful compression.
+      if(body&&bytes>=4096&&!headers.has('content-encoding')){
+        const compressed=await gzipAsync(new Uint8Array(body));
+        if(compressed.byteLength<bytes){body=compressed;headers.set('content-encoding','gzip');wireBytes=body.byteLength;}
+      }
+      request.signal.throwIfAborted();
       // Share the native HTTP/2 transport used by Codex. Never replay an inference
       // after a network error: the provider may already have accepted it.
       const upstream=await(options.upstream??nativeTransport)(`https://api.anthropic.com${url.pathname}${url.search}`,{method:request.method,headers,body,redirect:'error',signal:request.signal});
