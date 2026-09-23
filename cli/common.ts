@@ -28,6 +28,17 @@ export function exitOnSigterm(server: { stop(closeActiveConnections?: boolean): 
   });
 }
 
+// bootout returns while the old process is still draining, and bootstrap fails
+// with EIO until it exits. Bootstrapping immediately leaves the service
+// unloaded, so wait out the drain (launchd SIGKILLs at 20s).
+export async function reloadLaunchAgent(label: string, plist: string): Promise<boolean> {
+  const domain = `gui/${process.getuid!()}`;
+  const loaded = () => Bun.spawnSync(["launchctl", "print", `${domain}/${label}`], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+  Bun.spawnSync(["launchctl", "bootout", `${domain}/${label}`]);
+  for (let waited = 0; loaded() && waited < 25000; waited += 250) await Bun.sleep(250);
+  return Bun.spawnSync(["launchctl", "bootstrap", domain, plist]).exitCode === 0;
+}
+
 export function ensureDir() {
   mkdirSync(DIR, { recursive: true, mode: 0o700 });
 }

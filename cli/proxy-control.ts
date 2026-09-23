@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { DIR, HOME, ensureDir, exitOnSigterm } from "./common.ts";
+import { DIR, HOME, ensureDir, exitOnSigterm, reloadLaunchAgent } from "./common.ts";
 import { beginMeter } from "./meter-client.ts";
 import { createProxyHandler, type ProxyObservation } from "./codex-proxy.ts";
 import { proxyCredential, proxySelection, enableProxySelection, disableProxySelection } from "./codex.ts";
@@ -129,10 +129,7 @@ export async function proxyCommand(args: string[]) {
 <key>StandardOutPath</key><string>${xml(join(DIR, "codex-proxy.log"))}</string>
 <key>StandardErrorPath</key><string>${xml(join(DIR, "codex-proxy.log"))}</string>
 </dict></plist>\n`);
-    const domain = `gui/${process.getuid!()}`;
-    Bun.spawnSync(["launchctl", "bootout", `${domain}/${LABEL}`]);
-    const result = Bun.spawnSync(["launchctl", "bootstrap", domain, PLIST]);
-    if (result.exitCode) throw new Error("Could not start Router proxy service");
+    if (!await reloadLaunchAgent(LABEL, PLIST)) throw new Error("Could not start Router proxy service");
     for (let attempt = 0; attempt < 30; attempt++) {
       try { await health(); console.log("Router proxy is running on loopback."); return; } catch { await Bun.sleep(200); }
     }

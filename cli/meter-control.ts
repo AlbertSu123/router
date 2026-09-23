@@ -2,7 +2,7 @@ import {readFileSync,existsSync,writeFileSync,mkdirSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {personalSignIn,cancelPersonalSignIn} from './meter-login.ts';
-import {DIR,HOME,exitOnSigterm} from './common.ts';
+import {DIR,HOME,exitOnSigterm,reloadLaunchAgent} from './common.ts';
 import {meterAPI,meterSession,meterStatus,saveSession,syncMeter,beginMeter,readJSON,atomicJSON,type MeterCredential} from './meter-client.ts';
 const PENDING=join(DIR,'meter-login.json'), LABEL='dev.bryan.router.metering';
 const CLAUDE_SETTINGS=join(HOME,'.claude/settings.json');
@@ -85,8 +85,7 @@ export async function meterCommand(args:string[],credentials:()=>Promise<MeterCr
 <key>Label</key><string>${LABEL}</string><key>ProgramArguments</key><array><string>${xml(process.execPath)}</string><string>${xml(join(DIR,'lib/router.ts'))}</string><string>meter</string><string>serve</string></array>
 <key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(HOME)}</string><key>USER</key><string>${xml(process.env.USER??'')}</string><key>PATH</key><string>${xml(process.env.PATH??'/usr/bin:/bin')}</string></dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>${xml(log)}</string><key>StandardErrorPath</key><string>${xml(log)}</string></dict></plist>`,{mode:0o600});
-    const domain=`gui/${process.getuid!()}`;Bun.spawnSync(['launchctl','bootout',`${domain}/${LABEL}`]);
-    const result=Bun.spawnSync(['launchctl','bootstrap',domain,plist]);if(result.exitCode)throw new Error('Could not start the usage service');return;
+    if(!await reloadLaunchAgent(LABEL,plist))throw new Error('Could not start the usage service');return;
   }
   if(cmd==='serve'){
     let cached:MeterCredential[]=[],last=0;let pending:Promise<MeterCredential[]>|null=null;
