@@ -26,6 +26,10 @@ jobs:
         run: |
           swiftc menubar/Sources/Router/ResetTracking.swift menubar/Tests/ResetTrackingChecks.swift -o "$RUNNER_TEMP/reset-checks"
           "$RUNNER_TEMP/reset-checks"
+      - name: CLI process completion and timeout checks
+        run: |
+          swiftc menubar/Sources/Router/CLIProcess.swift menubar/Tests/CLIProcessChecks.swift -o "$RUNNER_TEMP/cli-checks"
+          "$RUNNER_TEMP/cli-checks"
       - name: Menu bar rendering checks
         run: |
           sources=()

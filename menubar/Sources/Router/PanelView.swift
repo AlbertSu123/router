@@ -21,13 +21,24 @@ struct PanelView: View {
                 }
                 Spacer()
                 Button { Task { await store.fetchUsage(); await store.refreshMeter() } } label: {
-                    Image(systemName: "arrow.clockwise")
+                    if store.fetchingUsage {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
                 }
                 .buttonStyle(.borderless)
+                .disabled(store.fetchingUsage)
                 .help("Refresh subscriptions and usage")
                 .accessibilityLabel("Refresh subscriptions and usage")
             }
             .padding(16)
+
+            if let checked = store.usageLastChecked {
+                Text("Usage checked \(checked.formatted(date: .omitted, time: .standard))")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .padding(.horizontal, 16).padding(.bottom, 8)
+            }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {

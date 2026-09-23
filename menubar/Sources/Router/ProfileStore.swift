@@ -273,12 +273,13 @@ final class ProfileStore {
         _ = await Self.runCLI(["heal", "--quiet"])
     }
 
-    private var fetchingUsage = false
+    private(set) var fetchingUsage = false
+    private(set) var usageLastChecked: Date?
 
     func fetchUsage() async {
         guard !fetchingUsage else { return }
         fetchingUsage = true
-        defer { fetchingUsage = false }
+        defer { fetchingUsage = false; usageLastChecked = Date() }
         guard let data = await Self.runCLI(["usage", "--json"]),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]]
         else {
@@ -436,30 +437,11 @@ final class ProfileStore {
     }
 
     nonisolated private static func run(_ args: [String]) async -> (ok: Bool, stdout: Data?, stderr: Data) {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: NSHomeDirectory() + "/.router/bin/router")
-            process.arguments = args
-            let out = Pipe()
-            let err = Pipe()
-            process.standardOutput = out
-            process.standardError = err
-            do { try process.run() } catch { continuation.resume(returning: (false, nil, Data())); return }
-            // Bound a stuck CLI/keychain/network process so polling recovers.
-            if ["usage", "heal", "status"].contains(args.first ?? "") {
-                DispatchQueue.global().asyncAfter(deadline: .now() + 45) {
-                    if process.isRunning { process.terminate() }
-                }
-            }
-            DispatchQueue.global(qos: .userInitiated).async {
-                // stderr carries one line of failure reason, far under a pipe
-                // buffer, so it can wait until stdout closes.
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                let errors = err.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                continuation.resume(returning: (process.terminationStatus == 0, data, errors))
-            }
-        }
+        let result = await CLIProcess.run(
+            executable: URL(fileURLWithPath: NSHomeDirectory() + "/.router/bin/router"),
+            arguments: args,
+            timeout: ["usage", "heal", "status"].contains(args.first ?? "") ? 45 : nil)
+        return (result.ok, result.stdout, result.stderr)
     }
 
     private func readCurrent() -> String {
