@@ -35,29 +35,36 @@ function atomic(path: string, value: string) {
 }
 const xml = (s: string) => s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 
-export function providerConfig(port: number, launcher: string): string {
+export function providerConfig(port: number, localToken: string): string {
+  if (!/^[a-f0-9]{64}$/.test(localToken)) throw new Error("Invalid proxy token");
   return `[model_providers.router]
 name = "OpenAI via Router"
 base_url = "http://127.0.0.1:${port}/v1"
 wire_api = "responses"
-requires_openai_auth = false
+requires_openai_auth = true
+http_headers = { "x-router-token" = "${localToken}" }
 supports_websockets = false
 stream_idle_timeout_ms = 300000
-[model_providers.router.auth]
-command = ${JSON.stringify(launcher)}
-args = ["proxy", "token"]
 `;
 }
 
-export function configureProxy(original: string, port: number, launcher: string): string {
-  if (original.includes(BEGIN)) return original;
+export function configureProxy(original: string, port: number, localToken: string): string {
+  const provider = providerConfig(port, localToken);
+  if (original.includes(BEGIN)) {
+    // Upgrade only our marked provider block, preserving the user's other edits
+    // and the original pre-Router backup used by disable.
+    if (!original.includes(TABLE_BEGIN) || !original.includes(TABLE_END)) throw new Error("Router provider markers are incomplete; refusing to overwrite config");
+    const next = original.replace(new RegExp(`${TABLE_BEGIN}[\\s\\S]*?${TABLE_END}`), `${TABLE_BEGIN}\n${provider}${TABLE_END}`);
+    Bun.TOML.parse(next);
+    return next;
+  }
   const parsed = Bun.TOML.parse(original) as any;
   if (parsed.model_providers?.router) throw new Error("A provider named router already exists; refusing to overwrite it");
   const firstTable = original.search(/^\s*\[/m);
   const root = firstTable < 0 ? original : original.slice(0, firstTable);
   const rest = firstTable < 0 ? "" : original.slice(firstTable);
   const next = `${BEGIN}\nmodel_provider = "router"\n${END}\n` + root.replace(/^model_provider\s*=.*\n?/m, "") + rest
-    + `\n${TABLE_BEGIN}\n${providerConfig(port, launcher)}${TABLE_END}\n`;
+    + `\n${TABLE_BEGIN}\n${provider}${TABLE_END}\n`;
   Bun.TOML.parse(next);
   return next;
 }
@@ -80,6 +87,22 @@ async function health() {
   const result: any = await r.json();
   if (result.service !== "router-codex-proxy") throw new Error("Unexpected service on proxy port");
   return result;
+}
+
+export async function proxyDoctor(report: (good: boolean, message: string) => void) {
+  if (!existsSync(CONFIG)) return;
+  try {
+    const config = Bun.TOML.parse(readFileSync(CONFIG, "utf8")) as any;
+    if (config.model_provider !== "router") return;
+    const provider = config.model_providers?.router;
+    report(provider?.requires_openai_auth === true && !provider?.auth,
+      "Router preserves ChatGPT browser/plugin authentication (repair: router proxy install && router proxy enable)");
+    report(provider?.http_headers?.["x-router-token"] === token(), "Router provider local authentication matches the service");
+    const live = await health();
+    report(live.separateClientAuth === true, "Router proxy supports separate client authentication");
+  } catch {
+    report(false, "Router proxy config/service needs repair: router proxy install && router proxy enable");
+  }
 }
 
 export async function proxyCommand(args: string[]) {
@@ -113,7 +136,11 @@ export async function proxyCommand(args: string[]) {
     if (!existsSync(SETTINGS)) atomic(SETTINGS, JSON.stringify({ port: 18789 }) + "\n");
     if (!proxySelection()) enableProxySelection();
     await proxyCredential();
-    try { await health(); console.log("Router proxy is already running."); return; } catch {}
+    try {
+      const live = await health();
+      if (live.separateClientAuth) { console.log("Router proxy is already running."); return; }
+      console.log("Updating Router proxy to support separate browser authentication.");
+    } catch {}
     mkdirSync(join(HOME, "Library/LaunchAgents"), { recursive: true });
     const runtime = join(DIR, "lib/router.ts");
     if (!existsSync(runtime)) throw new Error("Run ./install.sh first");
@@ -136,14 +163,16 @@ export async function proxyCommand(args: string[]) {
     throw new Error("Proxy did not become healthy; inspect ~/.router/codex-proxy.log");
   }
   if (command === "enable") {
-    await health();
+    const live = await health();
+    if (!live.separateClientAuth) throw new Error("Restart the updated Router proxy before enabling browser-compatible authentication");
     const original = readFileSync(CONFIG, "utf8");
-    if (!original.includes(BEGIN)) {
-      const next = configureProxy(original, settings().port, join(DIR, "bin/router"));
-      copyFileSync(CONFIG, BACKUP);
+    const next = configureProxy(original, settings().port, token());
+    if (next !== original) {
+      if (!original.includes(BEGIN)) copyFileSync(CONFIG, BACKUP);
+      else copyFileSync(CONFIG, join(DIR, `codex-config-before-auth-upgrade-${Date.now()}.toml`));
       atomic(CONFIG, next);
     }
-    console.log("Codex now defaults to Router. Relaunch existing sessions once; future account switches apply between requests.");
+    console.log("Codex now defaults to Router with ChatGPT browser/plugin authentication preserved. Resume existing sessions once to load the updated provider; future model account switches apply between requests.");
     return;
   }
   if (command === "disable") {

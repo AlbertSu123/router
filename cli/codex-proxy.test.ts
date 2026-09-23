@@ -80,14 +80,52 @@ test("rejects browser origins, missing tokens, arbitrary routes and never falls 
 
 test("enable/disable preserves unrelated config edits and the original provider", () => {
   const original = 'model_provider = "previous"\nmodel = "gpt-6-astra"\n[features]\nfoo = true\n';
-  const configured = configureProxy(original, 18789, "/tmp/router");
+  const configured = configureProxy(original, 18789, "a".repeat(64));
   expect((Bun.TOML.parse(configured) as any).model_provider).toBe("router");
-  expect(configureProxy(configured, 18789, "/tmp/router")).toBe(configured);
+  expect(configureProxy(configured, 18789, "a".repeat(64))).toBe(configured);
   const restored = unconfigureProxy(configured.replace("foo = true", "foo = false"), original);
   expect((Bun.TOML.parse(restored) as any).model_provider).toBe("previous");
   expect((Bun.TOML.parse(restored) as any).features.foo).toBe(false);
   expect(restored).not.toContain("model_providers.router");
-  expect(() => configureProxy('[model_providers.router]\nname = "existing"\n', 18789, "/tmp/router")).toThrow();
+  expect(() => configureProxy('[model_providers.router]\nname = "existing"\n', 18789, "a".repeat(64))).toThrow();
+});
+
+test("provider keeps ChatGPT auth and upgrades legacy managed config without losing edits", () => {
+  const original = 'model = "gpt-6-astra"\n[features]\nfoo = true\n';
+  const configured = configureProxy(original, 18789, "a".repeat(64));
+  const provider = (Bun.TOML.parse(configured) as any).model_providers.router;
+  expect(provider.requires_openai_auth).toBe(true);
+  expect(provider.auth).toBeUndefined();
+  expect(provider.http_headers["x-router-token"]).toBe("a".repeat(64));
+  const legacy = configured.replace(/requires_openai_auth = true\nhttp_headers = .*\n/, 'requires_openai_auth = false\n')
+    .replace('# router-proxy-provider: end', '[model_providers.router.auth]\ncommand = "/tmp/router"\nargs = ["proxy", "token"]\n# router-proxy-provider: end');
+  const upgraded = configureProxy(legacy, 18789, "b".repeat(64));
+  const parsed = Bun.TOML.parse(upgraded) as any;
+  expect(parsed.model_providers.router.auth).toBeUndefined();
+  expect(parsed.model_providers.router.requires_openai_auth).toBe(true);
+  expect(parsed.features.foo).toBe(true);
+  expect(unconfigureProxy(upgraded, original)).toBe(original);
+  expect(() => configureProxy(original, 18789, 'bad"\n')).toThrow("Invalid proxy token");
+  expect(() => configureProxy(legacy.replace('# router-proxy-provider: end', ''), 18789, "a".repeat(64))).toThrow("markers");
+});
+
+test("separate local authentication preserves switching and never forwards client secrets", async () => {
+  let selected = "a";
+  const seen: Headers[] = [];
+  const handler = createProxyHandler({ token: "local", credential: async () => accounts[selected]!,
+    upstream: (async (_url, init) => { seen.push(new Headers(init!.headers)); return new Response("ok"); }) as typeof fetch });
+  const call = (extra = {}) => request("/v1/responses", { authorization: "Bearer client-chatgpt", "x-router-token": "local", ...extra });
+  expect((await handler(call())).status).toBe(200);
+  selected = "b";
+  expect((await handler(call())).status).toBe(200);
+  expect(seen.map(h => h.get("authorization"))).toEqual(["Bearer secret-a", "Bearer secret-b"]);
+  expect(seen.every(h => !h.has("x-router-token"))).toBe(true);
+  expect((await handler(call({ "x-router-token": "wrong", authorization: "Bearer local" }))).status).toBe(401);
+  expect((await handler(call({ origin: "https://example.com" }))).status).toBe(401);
+  expect((await handler(request("/v1/responses", { authorization: "Bearer client-chatgpt" }))).status).toBe(401);
+  expect(seen).toHaveLength(2);
+  const health = await handler(new Request("http://127.0.0.1/health", { headers: { "x-router-token": "local" } }));
+  expect((await health.json()).separateClientAuth).toBe(true);
 });
 
 test("preserves compressed request framing without forwarding arbitrary auth", async () => {

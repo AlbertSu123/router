@@ -142,8 +142,11 @@ account. There is no automatic fallback: if the selected account is out of
 quota, select another account and retry in the same conversation.
 
 The launchd service listens only on `127.0.0.1:18789` and requires a private
-local token. Codex retrieves that token through `router proxy token`; OAuth
-credentials stay in Router's existing credential store. The proxy forwards
+local token. Codex sends it in a separate `x-router-token` header stored in
+its owner-readable config. The provider keeps `requires_openai_auth = true`
+and does not use a provider token command: command-backed auth replaces
+Codex's normal auth manager and can leave browser tools without a ChatGPT
+token. A normal ChatGPT sign-in is still required for those tools. The proxy forwards
 Responses and compaction requests directly to OpenAI, replacing credentials
 per request. It uses macOS’s native curl HTTP/2 transport, not WebSockets. Credentials pass
 to curl through a private pipe, never command arguments or temporary files. Large conversation uploads
@@ -155,6 +158,24 @@ Enabling backs up `~/.codex/config.toml` under `~/.router/` and adds the
 `router` model provider. `router proxy disable` removes only Router's managed
 configuration and restores the previous default provider while preserving
 other edits. The service stays available for existing routed sessions.
+
+To upgrade an older command-auth setup, rerun the install/enable commands
+above when no responses are streaming, then resume each existing Codex
+conversation once. Enable upgrades only Router's marked provider block and
+saves a separate pre-upgrade backup; it preserves the original disable backup.
+Older sessions can still use the previous local bearer-token authentication.
+The incoming ChatGPT credential and local token are never forwarded upstream:
+model requests use the Router-selected account. Browser/plugin identity remains
+the Codex session's signed-in ChatGPT identity and does not follow model-account
+switches. Do not share the managed provider block; it contains a local secret.
+`router doctor` checks for the legacy auth configuration, mismatched local
+tokens, and an outdated proxy service, and prints the repair command.
+
+Regression checks run on pushes and pull requests through GitHub Actions:
+`bun test cli metering`, `python3 -m unittest discover -s cli/tests -p '*integration.py' -v`,
+and the Swift build/reset checks. They cover both authentication modes,
+account switching, credential isolation, old-config migration and backups,
+idempotent enable/disable, and launchd's delayed shutdown during upgrades.
 
 Desktop Codex clients that read the same config may also use this provider
 after relaunch; desktop UI identity and ChatGPT chat traffic are not switched

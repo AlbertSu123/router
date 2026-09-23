@@ -27,7 +27,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 import * as codex from "./codex.ts";
-import { proxyCommand } from "./proxy-control.ts";
+import { proxyCommand, proxyDoctor } from "./proxy-control.ts";
 import { meterCommand } from "./meter-control.ts";
 import type { MeterCredential } from "./meter-client.ts";
 import {
@@ -944,6 +944,7 @@ async function cmdDoctor() {
   report(app.exitCode === 0, "menu bar app is running");
 
   codex.doctor(report);
+  await proxyDoctor(report);
   process.exit(ok ? 0 : 1);
 }
 

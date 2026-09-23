@@ -20,13 +20,17 @@ export function createProxyHandler(options: {
   const upstream = options.upstream ?? codexTransport;
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
-    const supplied = Buffer.from(request.headers.get("authorization") ?? "");
-    const expected = Buffer.from(`Bearer ${options.token}`);
+    // New clients retain ChatGPT auth for browser/plugins and authenticate to
+    // this loopback service separately. Keep legacy clients working, but never
+    // accept a ChatGPT bearer token alone as authorization to use Router.
+    const separateToken = request.headers.get("x-router-token");
+    const supplied = Buffer.from(separateToken ?? request.headers.get("authorization") ?? "");
+    const expected = Buffer.from(separateToken === null ? `Bearer ${options.token}` : options.token);
     if (request.headers.has("origin") || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
       return Response.json({ error: { message: "Router proxy authentication required" } }, { status: 401 });
     }
     if (url.pathname === "/health" && request.method === "GET") {
-      return Response.json({ service: "router-codex-proxy", ...(options.status?.() as object ?? {}) });
+      return Response.json({ ...(options.status?.() as object ?? {}), service: "router-codex-proxy", separateClientAuth: true });
     }
     const allowed = (request.method === "POST" && ["/v1/responses", "/v1/responses/compact"].includes(url.pathname))
       || (request.method === "GET" && url.pathname === "/v1/models");
