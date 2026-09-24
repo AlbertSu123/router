@@ -15,9 +15,12 @@ export function createProxyHandler(options: {
   upstream?: typeof fetch;
   observe?: (event: ProxyObservation) => void;
   status?: () => unknown;
-  meter?: (credential: ProxyCredential) => Promise<(response: Response) => Response>;
+  meter?: (credential: ProxyCredential, signal?: AbortSignal) => Promise<(response: Response) => Response>;
 }) {
   const upstream = options.upstream ?? codexTransport;
+  const observe = (event: ProxyObservation) => {
+    try { options.observe?.(event); } catch { /* Diagnostics must not interrupt inference. */ }
+  };
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     // New clients retain ChatGPT auth for browser/plugins and authenticate to
@@ -43,7 +46,7 @@ export function createProxyHandler(options: {
     }
     let metered = (response: Response) => response;
     if (request.method === "POST" && options.meter) {
-      try { metered = await options.meter(credential); }
+      try { metered = await options.meter(credential,request.signal); }
       catch { return Response.json({ error: { message: "Router could not verify usage attribution. Open Router to refresh subscription access." } }, { status: 503 }); }
     }
     const path = url.pathname.slice(3);
@@ -55,24 +58,27 @@ export function createProxyHandler(options: {
       if (value) headers.set(name, value);
     }
     headers.set("originator", "codex_cli_rs");
-    let body: ArrayBuffer | Uint8Array | undefined = request.method === "POST" ? await request.arrayBuffer() : undefined;
-    const bytes = body?.byteLength ?? 0;
-    // Custom-provider Codex clients send long conversation histories without
-    // compression. The Codex backend accepts zstd; keep existing encodings intact.
-    if (body && bytes >= 4096 && !headers.has("content-encoding")) {
-      body = await Bun.zstdCompress(new Uint8Array(body));
-      headers.set("content-encoding", "zstd");
-    }
-    const target = new URL(`https://chatgpt.com/backend-api/codex${path}`);
-    if (path === "/models" && url.searchParams.has("client_version")) target.searchParams.set("client_version", url.searchParams.get("client_version")!);
+    let body: ArrayBuffer | Uint8Array | undefined;
+    let bytes = 0;
     const started = Date.now();
     const metadata = () => ({ bytes, wireBytes: body?.byteLength ?? 0, elapsedMs: Date.now()-started, encoding: headers.get("content-encoding")?.slice(0,24) ?? null });
-    const send = () => {
-      headers.set("authorization", `Bearer ${credential.accessToken}`);
-      headers.set("chatgpt-account-id", credential.accountId);
-      return upstream(target, { method: request.method, headers, body, redirect: "error", signal: request.signal });
-    };
     try {
+      body = request.method === "POST" ? await request.arrayBuffer() : undefined;
+      bytes = body?.byteLength ?? 0;
+      // Custom-provider Codex clients send long conversation histories without
+      // compression. The Codex backend accepts zstd; keep existing encodings intact.
+      if (body && bytes >= 4096 && !headers.has("content-encoding")) {
+        body = await Bun.zstdCompress(new Uint8Array(body));
+        headers.set("content-encoding", "zstd");
+      }
+      const target = new URL(`https://chatgpt.com/backend-api/codex${path}`);
+      if (path === "/models" && url.searchParams.has("client_version")) target.searchParams.set("client_version", url.searchParams.get("client_version")!);
+      const send = () => {
+        headers.set("authorization", `Bearer ${credential.accessToken}`);
+        headers.set("chatgpt-account-id", credential.accountId);
+        return upstream(target, { method: request.method, headers, body, redirect: "error", signal: request.signal });
+      };
+      request.signal.throwIfAborted();
       let response = await send();
       // Retry only authentication rejection, before any response is streamed.
       // Refresh the SAME profile even if selection changed during this call.
@@ -80,14 +86,14 @@ export function createProxyHandler(options: {
         await response.body?.cancel();
         try { credential = await options.credential(credential.name, true); }
         catch (e) {
-          options.observe?.({ profile: credential.name, path, status: 401, session: null, at: new Date().toISOString() });
+          observe({ profile: credential.name, path, status: 401, session: null, at: new Date().toISOString() });
           return metered(e instanceof SignedOutError ? signedOut(e)
             : Response.json({ error: { message: `Router could not renew the sign-in for "${credential.name}"; no other account was used` } }, { status: 401 }));
         }
         response = await send();
       }
       const session = request.headers.get("session_id");
-      options.observe?.({ profile: credential.name, path, ...metadata(), status: response.status,
+      observe({ profile: credential.name, path, ...metadata(), status: response.status,
         session: session && /^[a-zA-Z0-9_-]{1,128}$/.test(session) ? session : null, at: new Date().toISOString() });
       const outgoing = new Headers(response.headers);
       // The transport requests uncompressed response bytes; framing belongs to Bun.
@@ -102,7 +108,7 @@ export function createProxyHandler(options: {
       const failure = request.signal.aborted ? "client_canceled"
         : typeof code === "string" && /^[A-Z_0-9]{1,64}$/.test(code) ? code : "transport_error";
       const status = request.signal.aborted ? 499 : 502;
-      options.observe?.({ profile: credential.name, path, ...metadata(), status, failure, session: null, at: new Date().toISOString() });
+      observe({ profile: credential.name, path, ...metadata(), status, failure, session: null, at: new Date().toISOString() });
       return metered(Response.json({ error: { message: status === 499 ? "Router request canceled by client"
         : `Router could not reach account "${credential.name}" (${failure}); retry this request. No other account was used.` } }, { status }));
     }

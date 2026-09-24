@@ -2,8 +2,28 @@ import {test,expect} from 'bun:test';
 import {meterResponse,type MeterEvent,responseWindows} from './meter-stream.ts';
 import {createClaudeHandler,configureClaudeSettings} from './meter-control.ts';
 import {randomUUID} from 'node:crypto';
+import {createProxyHandler} from './codex-proxy.ts';
 const initial=()=>({id:randomUUID(),subscription:'a'.repeat(64),at:Date.now(),windows:[]});
 const sse=(events:any[])=>events.map(e=>'data: '+JSON.stringify(e)+'\n\n').join('');
+test('request abort preserves partial usage exactly once and leaves completed usage untouched',async()=>{
+  const controller=new AbortController();const events:MeterEvent[]=[];let canceled=false;
+  const response=meterResponse(new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(sse([{type:'message_start',message:{usage:{input_tokens:50,output_tokens:3}}}])))} ,cancel(){canceled=true}}),{headers:{'content-type':'text/event-stream'}}),'claude',initial(),e=>events.push(e),controller.signal);
+  const reader=response.body!.getReader();await reader.read();controller.abort();await reader.cancel();
+  expect(events).toHaveLength(1);expect(events[0]).toMatchObject({input:50,output:3,status:499,complete:false});expect(canceled).toBe(true);
+  const completed=new AbortController();const success:MeterEvent[]=[];
+  await meterResponse(Response.json({type:'message',usage:{input_tokens:10,output_tokens:2}}),'claude',initial(),e=>success.push(e),completed.signal).text();
+  completed.abort();expect(success).toHaveLength(1);expect(success[0]).toMatchObject({status:200,complete:true,input:10,output:2});
+});
+test('both proxy handlers pass request cancellation to accounting before upstream headers',async()=>{
+  for(const provider of ['claude','codex']){
+    const controller=new AbortController();let captured:AbortSignal|undefined;let canceled=false;
+    const capture=async(_credential:unknown,signal?:AbortSignal)=>{captured=signal;signal?.addEventListener('abort',()=>{canceled=true});return (r:Response)=>r};
+    const upstream=(async()=>{controller.abort();throw new Error('canceled')}) as typeof fetch;
+    const handler=provider==='claude'?createClaudeHandler({credentials:async()=>[{provider:'claude',profile:'one',accessToken:'secret'}],capture,upstream}):createProxyHandler({token:'secret',credential:async()=>({name:'one',accessToken:'secret',accountId:'a'}),meter:capture,upstream});
+    const request=new Request('http://localhost/v1/'+(provider==='claude'?'messages':'responses'),{method:'POST',headers:{authorization:'Bearer secret'},body:'{}',signal:controller.signal});
+    expect((await handler(request)).status).toBe(499);expect(captured).toBe(request.signal);expect(canceled).toBe(true);
+  }
+});
 test('Codex chunks stream unchanged and only usage metadata is collected',async()=>{
   const raw=sse([{type:'response.output_text.delta',delta:'PRIVATE TEXT'},{type:'response.completed',response:{model:'model',usage:{input_tokens:120,input_tokens_details:{cached_tokens:80},output_tokens:30}}}]);
   const bytes=new TextEncoder().encode(raw);let i=0;let result:MeterEvent|undefined;

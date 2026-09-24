@@ -134,7 +134,7 @@ export async function proxyCommand(args: string[]) {
     const status = () => ({ metering: true, pid: process.pid, port, startedAt, selected: proxySelection(), requests, recent });
     const server = Bun.serve({ hostname: "127.0.0.1", port, idleTimeout: 0, maxRequestBodySize: 64 * 1024 * 1024,
       fetch: createProxyHandler({ token: token(), credential: proxyCredential, status,
-        meter: credential => beginMeter({ provider: "codex", profile: credential.name, accessToken: credential.accessToken, accountId: credential.accountId }),
+        meter: (credential,signal) => beginMeter({ provider: "codex", profile: credential.name, accessToken: credential.accessToken, accountId: credential.accountId },signal),
         observe(event) {
           requests++;
           recent.push(event);

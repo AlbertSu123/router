@@ -7,6 +7,18 @@ const accounts: Record<string, ProxyCredential> = {
   a: { name: "a", accessToken: "secret-a", accountId: "account-a" },
   b: { name: "b", accessToken: "secret-b", accountId: "account-b" },
 };
+test('diagnostic failures cannot turn an accepted response into a retryable error',async()=>{
+  let calls=0;
+  const handler=createProxyHandler({token:'local',credential:async()=>accounts.a!,observe:()=>{throw new Error('disk unavailable')},upstream:(async()=>{calls++;return new Response('accepted')}) as typeof fetch});
+  const response=await handler(request());expect(response.status).toBe(200);expect(await response.text()).toBe('accepted');expect(calls).toBe(1);
+});
+test('failed incoming body is finalized without sending an upstream request',async()=>{
+  let calls=0,finalized=0;
+  const handler=createProxyHandler({token:'local',credential:async()=>accounts.a!,meter:async()=>r=>{finalized++;return r},upstream:(async()=>{calls++;return new Response('unexpected')}) as typeof fetch});
+  const body=new ReadableStream({start(c){c.error(new Error('private payload read failed'))}});
+  const response=await handler(new Request('http://localhost/v1/responses',{method:'POST',headers:{authorization:'Bearer local'},body}));
+  expect(response.status).toBe(502);expect(await response.text()).not.toContain('private payload');expect(finalized).toBe(1);expect(calls).toBe(0);
+});
 const request = (path = "/v1/responses", extra: Record<string, string> = {}) => new Request(`http://127.0.0.1${path}`, {
   method: "POST", headers: { authorization: "Bearer local", "content-type": "application/json", ...extra }, body: '{"input":"test"}',
 });

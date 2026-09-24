@@ -70,7 +70,10 @@ There is no global admin dashboard that bypasses this boundary.
   inference. Switching accounts or signing out mid-stream does not reattribute it.
 - Inference stays local-to-provider. Streaming inspection stores counters only,
   preserves original response bytes and backpressure, and records partial/unknown
-  results honestly when canceled. A crash can leave an incomplete request with
+  results honestly when canceled. Client disconnects finalize accounting even
+  before upstream headers arrive or when the response is never read, and cancel
+  the upstream reader. Already collected counters are retained; late completion
+  cannot overwrite a canceled event. A crash can leave an incomplete request with
   unknown token counts; it is not presented as a successful zero-token request.
 - Events queue in private `~/.router/meter-queue.sqlite`, including across service
   restarts and network failures. Completed events upload in idempotent batches.

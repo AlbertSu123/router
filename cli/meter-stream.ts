@@ -17,14 +17,14 @@ export function responseWindows(provider: string, headers: Headers): MeterWindow
   else for(const [key,prefix]of [['session','5h'],['weekly_all','7d']])add(key!,headers.get(`anthropic-ratelimit-unified-${prefix}-reset`),headers.get(`anthropic-ratelimit-unified-${prefix}-utilization`),100);
   return windows;
 }
-export function meterResponse(response: Response, provider: string, initial: Pick<MeterEvent,'id'|'subscription'|'at'|'windows'>, done:(e:MeterEvent)=>void):Response {
+export function meterResponse(response: Response, provider: string, initial: Pick<MeterEvent,'id'|'subscription'|'at'|'windows'>, done:(e:MeterEvent)=>void, signal?:AbortSignal):Response {
   const live=responseWindows(provider,response.headers);
   const normalized = live.map(w => { const old = initial.windows.find(o => o.key === w.key && Math.abs(o.reset-w.reset) < 60); return {...w,reset:old?.reset ?? w.reset}; });
   const windows=[...initial.windows.filter(w=>w.reset*1000>initial.at&&!normalized.some(l=>l.key===w.key)),...normalized];
   const event:MeterEvent={...initial,windows,model:'unknown',input:0,cached:0,cacheWrite:0,output:0,status:response.status,complete:false};
   let finished=false,buffer='',dropped=false,sawUsage=false;
   const decoder=new TextDecoder();
-  const finish=()=>{if(!finished){finished=true;try{done({...event,complete:event.complete&&sawUsage})}catch{/* Local failure must not lose the response. */}}};
+  const finish=()=>{if(!finished){finished=true;signal?.removeEventListener('abort',onAbort);try{done({...event,complete:event.complete&&sawUsage})}catch{/* Local failure must not lose the response. */}}};
   function usage(u:any){
     if(!u||typeof u!=='object')return;
     const number=(n:any)=>Number.isSafeInteger(n)&&n>=0&&n<=1e9?n:undefined;
@@ -46,11 +46,20 @@ export function meterResponse(response: Response, provider: string, initial: Pic
     if(sse){let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end).replace(/\r$/,'');buffer=buffer.slice(end+1);if(!dropped&&line.startsWith('data:'))parse(line.slice(5).trim());dropped=false;}}
     if(buffer.length>8*1024*1024){buffer='';dropped=true;}
   }
-  if(!response.body){finish();return response}
-  const reader=response.body.getReader();
+  let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
+  const onAbort=()=>{
+    event.complete=false;event.status=499;finish();
+    // The client may never consume/cancel the returned stream. Request abort
+    // must finalize accounting and release upstream independently of demand.
+    void reader?.cancel(signal?.reason).catch(()=>{});
+  };
+  if(!response.body){if(signal?.aborted){event.status=499;event.complete=false}finish();return response}
+  reader=response.body.getReader();
+  signal?.addEventListener('abort',onAbort,{once:true});
+  if(signal?.aborted)onAbort();
   const stream=new ReadableStream<Uint8Array>({
-    async pull(controller){try{const next=await reader.read();if(next.done){buffer+=decoder.decode();if(!dropped){if(sse&&buffer.startsWith('data:'))parse(buffer.slice(5).trim());else if(!sse)parse(buffer)}finish();controller.close()}else{consume(next.value);controller.enqueue(next.value)}}catch(e){event.complete=false;finish();controller.error(e)}},
-    async cancel(reason){event.complete=false;finish();await reader.cancel(reason)},
+    async pull(controller){try{const next=await reader!.read();if(next.done){buffer+=decoder.decode();if(!dropped){if(sse&&buffer.startsWith('data:'))parse(buffer.slice(5).trim());else if(!sse)parse(buffer)}finish();controller.close()}else{consume(next.value);controller.enqueue(next.value)}}catch(e){event.complete=false;finish();controller.error(e)}},
+    async cancel(reason){event.complete=false;event.status=499;finish();await reader!.cancel(reason)},
   });
   return new Response(stream,{status:response.status,statusText:response.statusText,headers:response.headers});
 }

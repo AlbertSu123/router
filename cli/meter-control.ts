@@ -37,7 +37,7 @@ export function createClaudeHandler(options:{observe?:(event:ClaudeObservation)=
     if(!credential)return new Response('This Claude credential is not signed into Router. Refresh or add it in Router.',{status:401});
     let wrap=(r:Response)=>r;
     if(url.pathname==='/v1/messages'&&request.method==='POST'){
-      try{wrap=await (options.capture??beginMeter)(credential)}catch{return Response.json({type:'error',error:{type:'api_error',message:'Router could not verify usage attribution. Open Router to refresh subscription access.'}},{status:503})}
+      try{wrap=await (options.capture??beginMeter)(credential,request.signal)}catch{return Response.json({type:'error',error:{type:'api_error',message:'Router could not verify usage attribution. Open Router to refresh subscription access.'}},{status:503})}
     }
     const headers=new Headers();
     for(const [name,value]of request.headers)if(['authorization','x-api-key','accept','content-type','content-encoding','user-agent'].includes(name)||name.startsWith('anthropic-')||name.startsWith('x-stainless-'))headers.set(name,value);

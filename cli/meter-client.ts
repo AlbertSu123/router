@@ -61,7 +61,7 @@ export async function syncMeter(credentials:MeterCredential[]){
   return meterStatus();
 }
 // Snapshot the person and subscription BEFORE inference; a switch mid-stream cannot reattribute it.
-export async function beginMeter(credential:MeterCredential):Promise<(response:Response)=>Response>{
+export async function beginMeter(credential:MeterCredential,signal?:AbortSignal):Promise<(response:Response)=>Response>{
   const session=meterSession();if(!session)return r=>r;
   const fp=fingerprint(credential.accessToken+(credential.accountId??''));
   let mapping:Mapping|undefined=(readJSON(MAP,[]) as Mapping[]).find(m=>m.fingerprint===fp&&m.provider===credential.provider);
@@ -73,9 +73,19 @@ export async function beginMeter(credential:MeterCredential):Promise<(response:R
   const capture={id:randomUUID(),subscription:mapping.id,at:Date.now(),windows:mapping.windows.filter(w=>w.reset*1000>Date.now())};
   // Open the durable queue before the request so a disk error cannot silently discard usage.
   db().run('INSERT INTO queue(id,user,event,ready,owner) VALUES(?,?,?,0,?)',[capture.id,session.user.id,JSON.stringify({...capture,model:'unknown',input:0,cached:0,cacheWrite:0,output:0,status:499,complete:false}),process.pid]);
-  return response=>meterResponse(response,credential.provider,capture,(event:MeterEvent)=>{
+  let finalized=false;
+  const persist=(event:MeterEvent)=>{
+    if(finalized)return;finalized=true;
+    signal?.removeEventListener('abort',beforeResponseAbort);
     // Claude's input_tokens excludes cache reads; normalize to inclusive input.
     if(credential.provider==='claude')event.input+=event.cached;
     try { db().run('UPDATE queue SET event=?,ready=1 WHERE id=? AND user=?',[JSON.stringify(event),event.id,session.user.id]); } catch { atomicJSON(join(DIR,'meter-sync-status.json'),{error:'Could not save request token counts. Check available disk space.'}); }
-  });
+  };
+  const beforeResponseAbort=()=>persist({...capture,model:'unknown',input:0,cached:0,cacheWrite:0,output:0,status:499,complete:false});
+  signal?.addEventListener('abort',beforeResponseAbort,{once:true});
+  if(signal?.aborted)beforeResponseAbort();
+  return response=>{
+    signal?.removeEventListener('abort',beforeResponseAbort);
+    return meterResponse(response,credential.provider,capture,persist,signal);
+  };
 }
