@@ -62,6 +62,7 @@ struct Usage: Equatable {
     let credits: UsageLimit?
 
     var error: String? = nil
+    var retryAt: Double? = nil
 
     var isEmpty: Bool { error == nil && !stale && !signedOut && five == nil && week == nil && scoped.isEmpty && credits == nil && resets == nil }
 
@@ -303,7 +304,8 @@ final class ProfileStore {
                 week: Self.limit("7d", limits["week"]),
                 scoped: scoped.keys.sorted().compactMap { Self.limit($0, scoped[$0]) },
                 credits: Self.credits(limits["credits"]),
-                error: limits["error"] as? String)
+                error: limits["error"] as? String,
+                retryAt: limits["retryAt"] as? Double)
             if !row.isEmpty { next[name] = row }
         }
         if next != usage { usage = next }

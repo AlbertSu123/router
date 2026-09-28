@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 import * as codex from "./codex.ts";
+import { pollClaudeUsage } from "./claude-usage.ts";
 import { proxyCommand, proxyDoctor, terminalCodexArgs } from "./proxy-control.ts";
 import { meterCommand } from "./meter-control.ts";
 import type { MeterCredential } from "./meter-client.ts";
@@ -800,22 +801,20 @@ async function cmdUsage(args: string[]) {
           headers: { Authorization: `Bearer ${bearer}`, "anthropic-beta": "oauth-2025-04-20" },
           signal: AbortSignal.timeout(6000),
         });
-        let r = await get(token);
-        // The endpoint's 429s say nothing about the token; a 401 does, so
-        // only that earns a refresh — main's pair belongs to Claude Code.
-        if (r.status === 401 && name !== MAIN) {
-          const stored = readToken(name);
-          const next = stored && (await refreshStoredToken(name, stored));
-          if (loadProfiles()[name]?.signedOutAt) { signedOut.add(name); return; }
-          if (next) r = await get(next.accessToken);
-        }
-        if (!r.ok) return;
-        const body: any = await r.json();
-        const row = parseLimits(body);
-        if (row) {
-          out[name] = { ...row, observedAt: Date.now() / 1000, stale: false };
-          writeFileSync(join(cacheDir, `usage-limits-${name}.json`), JSON.stringify(body));
-        }
+        const reading = await pollClaudeUsage({directory:cacheDir,profile:name,valid:body=>parseLimits(body)!==null,request:async()=>{
+          let r = await get(token);
+          // Refresh only an explicitly rejected saved sign-in, never on 429.
+          if (r.status === 401 && name !== MAIN) {
+            await r.body?.cancel();
+            const stored = readToken(name);
+            const next = stored && (await refreshStoredToken(name, stored));
+            if (loadProfiles()[name]?.signedOutAt) signedOut.add(name);
+            if (next) r = await get(next.accessToken);
+          }
+          return r;
+        }});
+        out[name] = { ...(parseLimits(reading.body) ?? {}), observedAt:reading.observedAt,
+          stale:reading.stale,error:reading.error,retryAt:reading.retryAt };
       } catch {}
     }),
   );
@@ -878,6 +877,9 @@ async function cmdUsage(args: string[]) {
         if (u.stale) parts.push("cached reset data");
       }
       if (u.signedOut) parts.push("signed out — add the account again");
+      if (u.error) parts.push(u.error);
+      if (u.stale && u.observedAt) parts.push(`cached ${Math.max(0,Math.floor(Date.now()/1000-u.observedAt))}s ago`);
+      if (u.error && u.retryAt && u.retryAt>Date.now()/1000) parts.push(`retry in ${Math.ceil(u.retryAt-Date.now()/1000)}s`);
       console.log(`${name.padEnd(20)} ${parts.length ? parts.join("  ") : "no limits reported"}`);
     }
   }

@@ -3,6 +3,15 @@
 Switch Claude Code between Claude accounts, and Codex between ChatGPT
 accounts, from the macOS menu bar or the terminal.
 
+Claude usage refreshes share a two-minute cache across Router processes. Manual
+refresh and automatic polling respect the same cooldown. If Claude rate-limits
+its usage endpoint, Router honors `Retry-After` and backs off from two to fifteen
+minutes (or longer if the provider requests it). Cached readings show their age
+and the next retry in the menu; unavailable data is never reported as fresh.
+Codex usage continues polling independently. This cooldown only affects usage
+checks, not inference, and cannot prevent limits caused by other clients sharing
+the same provider account.
+
 Paste this into your agent (Claude Code) to get set up:
 
 ```text

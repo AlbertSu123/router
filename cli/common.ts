@@ -115,6 +115,7 @@ export type UsageRow = {
   error?: string;
   resets?: import("./codex-resets.ts").ResetCredits;
   observedAt?: number;
+  retryAt?: number;
   stale?: boolean;
   // The provider rejected the account's refresh token: it needs a new
   // sign-in, and the row carries no readings.

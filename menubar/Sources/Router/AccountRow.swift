@@ -49,6 +49,18 @@ struct AccountRow: View {
                     if let usage, usage.signedOut == false, let error = usage.error {
                         Text(error).font(.caption).foregroundStyle(.orange)
                     }
+                    if let usage, !usage.signedOut, usage.stale || usage.error != nil {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            VStack(alignment: .leading, spacing: 2) {
+                                if let observed = usage.observedAt {
+                                    Text("Last reading \(Date(timeIntervalSince1970: observed), style: .relative) ago · cached")
+                                }
+                                if let retry = usage.retryAt, retry > context.date.timeIntervalSince1970 {
+                                    Text("Retrying in \(Int(ceil(retry - context.date.timeIntervalSince1970)))s")
+                                }
+                            }.font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 Spacer(minLength: 0)
                 if let limit = usage?.headline {
