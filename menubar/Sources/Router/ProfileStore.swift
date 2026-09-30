@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import OSLog
 
 // Which CLI an account signs in to. The two are switched independently and
 // the CLI addresses a Codex profile by its prefixed id.
@@ -271,7 +272,14 @@ final class ProfileStore {
     }
 
     func heal() async {
-        _ = await Self.runCLI(["heal", "--quiet"])
+        let result = await Self.run(["heal", "--quiet"])
+        let logger = Logger(subsystem: "dev.bryan.router", category: "token-renewal")
+        // Never log CLI output: it may contain account or credential details.
+        if result.ok {
+            logger.debug("Background healing command completed")
+        } else {
+            logger.error("Background healing command failed or timed out; the next poll will retry")
+        }
     }
 
     private(set) var fetchingUsage = false
