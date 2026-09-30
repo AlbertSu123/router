@@ -25,8 +25,16 @@ struct CLIProcessChecks {
         precondition(!timed.ok && timed.stdout == nil && Date().timeIntervalSince(start) < 0.7, "Timeout did not release caller")
         let retry = await CLIProcess.run(executable: URL(fileURLWithPath: "/bin/echo"), arguments: ["recovered"], timeout: 3)
         precondition(retry.ok)
+        // `heal --quiet` normally exits without either output stream. Its
+        // continuation must resume so subsequent automatic renewals can run,
+        // including after a preceding command exceeded its deadline.
+        for _ in 0..<20 {
+            let heal = await CLIProcess.run(executable: URL(fileURLWithPath: "/usr/bin/true"), arguments: [], timeout: 3)
+            precondition(heal.ok && heal.stdout == Data() && heal.stderr.isEmpty,
+                         "Silent background healing did not release the next poll")
+        }
         // Let late termination callbacks race the already-completed timeout.
         try? await Task.sleep(for: .milliseconds(100))
-        print("CLI completion: concurrent fast exits, full stdout/stderr, errors, missing executable, timeout and retry passed.")
+        print("CLI completion: concurrent fast exits, full stdout/stderr, errors, missing executable, timeout, retry and repeated silent healing passed.")
     }
 }
